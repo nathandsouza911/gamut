@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# Copy .env.example to .env first. Production: docker compose up -d
+# Setup: see docs/quick-start.md. Copy .env.example to .env first, then: docker compose up -d --build
+#
+# .env is read by Compose for interpolation only. Each service below lists exactly the
+# variables it receives, so:
+#   - only `migrate` gets the schema-owner database URL (and it exits when done);
+#   - only `worker` gets the credential private key (a Compose secret);
+#   - `web` gets the session secret, OIDC client secret and the public key only.
+x-build: &build
+  context: .
+  dockerfile: backend/Dockerfile
+  target: runtime
+  args:
+    GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/OWNER/gamut}
+
 services:
   db:
     image: postgres:16
@@ -15,6 +28,7 @@ services:
       # Creates gamut_owner (owns the schema; migrations only) and gamut_app (web and
       # worker; no UPDATE/DELETE on audit_events) the first time the volume is empty.
       - ./backend/docker/initdb:/docker-entrypoint-initdb.d:ro
+    # No ports: the database is reachable only from the other services.
     healthcheck:
       # TCP check: during init the temporary server listens on the socket only.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U gamut -d gamut"]
@@ -23,48 +37,87 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # One-shot: applies database migrations as the schema owner, then exits. web and worker
+  # start only after it succeeds, and the long-running containers never see this URL.
+  migrate:
+    build: *build
+    image: gamut-migrate
+    command: ["alembic", "-c", "/app/backend/alembic.ini", "upgrade", "head"]
+    environment:
+      GAMUT_MIGRATE_DATABASE_URL: postgresql+psycopg://gamut_owner:${GAMUT_OWNER_DB_PASSWORD}@db:5432/gamut
+    read_only: true
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   web:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-      target: runtime
+    build: *build
     image: gamut-web
-    command: gamut web
-    env_file: .env
+    command: ["gamut", "web"]
+    environment:
+      GAMUT_DATABASE_URL: postgresql+psycopg://gamut_app:${GAMUT_APP_DB_PASSWORD}@db:5432/gamut
+      GAMUT_SECRET_KEY: ${GAMUT_SECRET_KEY:?set GAMUT_SECRET_KEY in .env}
+      GAMUT_CREDENTIAL_PUBLIC_KEY: ${GAMUT_CREDENTIAL_PUBLIC_KEY:?set GAMUT_CREDENTIAL_PUBLIC_KEY in .env}
+      GAMUT_BOOTSTRAP_ADMIN_EMAIL: ${GAMUT_BOOTSTRAP_ADMIN_EMAIL:-}
+      GAMUT_BOOTSTRAP_ADMIN_PASSWORD: ${GAMUT_BOOTSTRAP_ADMIN_PASSWORD:-}
+      GAMUT_OIDC_CLIENT_ID: ${GAMUT_OIDC_CLIENT_ID:-}
+      GAMUT_OIDC_CLIENT_SECRET: ${GAMUT_OIDC_CLIENT_SECRET:-}
+      GAMUT_OIDC_METADATA_URL: ${GAMUT_OIDC_METADATA_URL:-https://accounts.google.com/.well-known/openid-configuration}
+      GAMUT_PUBLIC_BASE_URL: ${GAMUT_PUBLIC_BASE_URL:-}
+      # Addresses whose X-Forwarded-For is trusted: by default the gateway of the pinned
+      # network below, which is where traffic from a reverse proxy on the host arrives
+      # (the published port is bound to 127.0.0.1, so only the host can connect).
+      GAMUT_FORWARDED_ALLOW_IPS: ${GAMUT_FORWARDED_ALLOW_IPS:-172.30.80.1}
+      GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/OWNER/gamut}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-      target: runtime
+    build: *build
     image: gamut-worker
-    command: gamut worker
+    command: ["gamut", "worker"]
     user: "10001"
     read_only: true
+    # A GAM call may run for minutes; on `docker compose stop` the worker finishes the
+    # step it is on before exiting. If it is killed anyway, the job's lease expires and
+    # another worker re-runs the interrupted step (steps are idempotent).
+    stop_grace_period: 120s
     tmpfs:
       # Per-job GAM configuration directories (decrypted credentials).
       - /run/gamut-jobs:mode=0700,uid=10001
       # The root filesystem is read-only; Python and libraries may still want /tmp.
       - /tmp:mode=0700,uid=10001,size=64m
-    env_file: .env
     environment:
+      GAMUT_DATABASE_URL: postgresql+psycopg://gamut_app:${GAMUT_APP_DB_PASSWORD}@db:5432/gamut
       GAMUT_CREDENTIAL_PRIVATE_KEY_FILE: /run/secrets/credential_private_key
     secrets:
       - credential_private_key
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 secrets:
   credential_private_key:
     file: ${GAMUT_PRIVATE_KEY_PATH:-./secrets/credential_private_key}
+
+networks:
+  default:
+    # Pinned so the reverse-proxy trust above has a known address. Change both this subnet
+    # and GAMUT_FORWARDED_ALLOW_IPS (to the subnet's .1) if it clashes with your network.
+    ipam:
+      config:
+        - subnet: 172.30.80.0/24
+          gateway: 172.30.80.1
 
 volumes:
   gamut-db:

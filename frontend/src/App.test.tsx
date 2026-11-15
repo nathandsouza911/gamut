@@ -18,3 +18,11 @@ test("the sign-in page shows the product name and the source link", async () => 
   const link = await screen.findByRole("link", { name: "Source code" });
   expect(link.getAttribute("href")).toBe("https://example.com/src");
 });
+
+test("the source link still renders when /api/meta fails", async () => {
+  vi.mocked(api.meta).mockRejectedValue(new ApiError(500, "boom"));
+  vi.mocked(api.me).mockRejectedValue(new ApiError(401, "not signed in"));
+  render(<App />);
+  const link = await screen.findByRole("link", { name: "Source code" });
+  expect(link.getAttribute("href")).toMatch(/^https:\/\//);
+});
