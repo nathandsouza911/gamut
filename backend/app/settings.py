@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Worker: where each job decrypts its tenant's GAM files (a tmpfs in Compose).
     job_dir: Path = Path("/run/gamut-jobs")
 
+    # Web: directory of the built UI; skipped when it does not exist.
+    static_dir: Path = Path("/app/static")
+
     source_url: str = "https://github.com/OWNER/gamut"
     gam_bin: str = "gam"
 

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""FastAPI application factory for the web process.
-
-The static UI mount arrives with the UI (Task 8).
-"""
+"""FastAPI application factory for the web process (API plus the built UI)."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import auth, jobs, tenants, users, workflows
+from app.api import audit, auth, jobs, tenants, users, workflows
 from app.auth.bootstrap import ensure_bootstrap_owner
 from app.auth.oidc import OidcClient
 from app.auth.ratelimit import SlidingWindowLimiter
@@ -64,7 +65,29 @@ def create_app(
         https_only=True,
     )
     for router in (auth.router, users.router, tenants.router, workflows.router,
-                   jobs.router):
+                   jobs.router, audit.router, audit.global_router):
         app.include_router(router)
+
+    _mount_ui(app, settings.static_dir)
     check_tenant_routes(app)
     return app
+
+
+def _mount_ui(app: FastAPI, directory: Path) -> None:
+    """Serve the built UI from 404s: a file that exists is sent, any other non-API GET gets
+    index.html (client-side routing). Routes win over it, and /api/* misses stay JSON."""
+    root = directory.resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        return
+
+    @app.exception_handler(StarletteHTTPException)
+    async def not_found_to_ui(request: Request, exc: StarletteHTTPException) -> Response:
+        path = request.url.path.lstrip("/")
+        is_api = path == "api" or path.startswith("api/")
+        if exc.status_code != 404 or request.method != "GET" or is_api:
+            return await http_exception_handler(request, exc)
+        candidate = (root / path).resolve()
+        if path and candidate.is_file() and candidate.is_relative_to(root):
+            return FileResponse(candidate)
+        return FileResponse(index)
