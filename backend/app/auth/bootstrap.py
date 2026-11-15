@@ -53,7 +53,8 @@ def ensure_bootstrap_owner(settings: Settings) -> None:
 def verify_password_login(db: Session, email: str, password: str) -> User | None:
     """The password user with this email if the password matches, else None.
 
-    Only accounts with a password hash (the bootstrap owner) can match.
+    Only accounts with a password hash (the bootstrap owner) can match, and never a
+    disabled account.
     """
     user = db.scalar(select(User).where(func.lower(User.email) == normalize_email(email)))
     stored = user.password_hash if user is not None else None
@@ -61,7 +62,7 @@ def verify_password_login(db: Session, email: str, password: str) -> User | None
         _hasher.verify(stored or _DUMMY_HASH, password)
     except (VerificationError, InvalidHashError):
         return None
-    if user is None or stored is None:
+    if user is None or stored is None or user.disabled:
         return None
     if _hasher.check_needs_rehash(stored):
         user.password_hash = _hasher.hash(password)

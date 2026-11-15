@@ -106,6 +106,8 @@ class User(Base):
     is_owner: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     # Only the bootstrap admin has a password (argon2 hash); everyone else uses OIDC.
     password_hash: Mapped[str | None] = mapped_column(Text)
+    # A disabled user cannot sign in, and sessions they still hold are rejected.
+    disabled: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = _created_at()
 
 
@@ -213,6 +215,8 @@ class Job(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # New on every claim; state is written only while the row still carries it.
     claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # Claims after an expired lease; the job fails after app.jobs.queue.MAX_RECLAIMS.
+    reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = _created_at()
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

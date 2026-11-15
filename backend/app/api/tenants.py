@@ -6,7 +6,9 @@ POST   /api/tenants                               (owner) add a tenant, status p
 GET    /api/tenants/{tenant_id}                   any role on the tenant
 PATCH  /api/tenants/{tenant_id}                   (owner) set admin_email and/or domains
 DELETE /api/tenants/{tenant_id}                   (owner) delete it; audit events stay
+GET    /api/tenants/{tenant_id}/members           (owner or tenant admin) list members
 POST   /api/tenants/{tenant_id}/members           (owner or tenant admin) set a user's role
+DELETE /api/tenants/{tenant_id}/members/{user_id} (owner or tenant admin) remove a role
 PUT    /api/tenants/{tenant_id}/credentials       (owner) upload or replace the GAM files
 DELETE /api/tenants/{tenant_id}/credentials       (owner) delete the stored GAM files
 POST   /api/tenants/{tenant_id}/health-check      (owner or tenant admin) queue a check
@@ -322,6 +324,60 @@ def set_member(
             },
         )
         return MemberOut(email=user.email, role=role)
+
+
+class MemberRow(BaseModel):
+    user_id: uuid.UUID
+    email: str
+    display_name: str | None
+    role: Role
+    disabled: bool
+
+
+@router.get("/{tenant_id}/members")
+def list_members(
+    tenant_id: uuid.UUID,
+    membership: Annotated[Membership, Depends(require_tenant_role(Role.admin))],
+) -> list[MemberRow]:
+    """The tenant's members (owners are not members: they reach every tenant)."""
+    with session_scope() as db:
+        rows = db.execute(
+            select(User, Membership.role)
+            .join(Membership, Membership.user_id == User.id)
+            .where(Membership.tenant_id == tenant_id)
+            .order_by(User.email)
+        ).all()
+        return [MemberRow(user_id=u.id, email=u.email, display_name=u.display_name, role=r,
+                          disabled=u.disabled) for u, r in rows]
+
+
+@router.delete("/{tenant_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_member(
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    membership: Annotated[Membership, Depends(require_tenant_role(Role.admin))],
+    actor: Annotated[User, Depends(current_user)],
+) -> None:
+    """Remove a user's role on this tenant (404 if they have none here). Audited as
+    membership.remove. The user's sessions stay valid, but every request re-checks the
+    membership, so the tenant is a 404 for them from the next request on."""
+    with session_scope() as db:
+        row = db.scalar(
+            select(Membership)
+            .where(Membership.user_id == user_id, Membership.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "membership not found")
+        user = db.get(User, user_id)
+        previous = row.role
+        db.delete(row)
+        db.flush()
+        append_event(
+            db, actor=actor.email, tenant_id=tenant_id, action="membership.remove",
+            target=user.email if user is not None else str(user_id),
+            details={"user_id": str(user_id), "previous_role": previous.value},
+        )
 
 
 def _queue_health_check(db: Session, tenant: Tenant, user: User) -> Job:

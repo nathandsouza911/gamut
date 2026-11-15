@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Request authentication and authorisation dependencies.
 
-- current_user: the signed-in User (401 without a live session). For POST, PUT, PATCH
-  and DELETE it also enforces the CSRF token (403).
+- current_user: the signed-in User (401 without a live session, or when the user is
+  disabled). For POST, PUT, PATCH and DELETE it also enforces the CSRF token (403).
 - require_owner: 403 unless the user is an owner.
 - require_tenant_role(*roles): the caller's Membership on the `tenant_id` path parameter.
   Owners always pass (with a transient Membership whose role is `owner`). A user with no
@@ -40,6 +40,9 @@ def authenticate(request: Request) -> User:
         if row is not None:
             user = db.get(User, row.user_id)
             csrf_token = row.csrf_token
+            if user is not None and user.disabled:  # disabled since the session began
+                db.delete(row)
+                user = None
     # Raised after the commit, so an expired session's deletion is kept.
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not signed in")

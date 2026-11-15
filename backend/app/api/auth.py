@@ -86,6 +86,8 @@ def _finish_oidc(identity: OidcIdentity) -> tuple[str, str] | str:
                 user.oidc_subject = identity.subject  # first OIDC sign-in links the account
             elif user.oidc_subject != identity.subject:
                 return "subject_mismatch"
+        if user.disabled:
+            return "user_disabled"
         session = create_session(db, user.id)
         append_event(
             db, actor=user.email, tenant_id=None, action="auth.login",
