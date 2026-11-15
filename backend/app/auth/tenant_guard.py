@@ -9,6 +9,7 @@ route exists for that tenant). create_app() calls check_tenant_routes() and refu
 start if any `{tenant_id}` route uses another route class.
 """
 
+import re
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
@@ -18,6 +19,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.routing import BaseRoute
 
 from app.auth.deps import authenticate, tenant_access
+
+# `{tenant_id}` with or without a converter (`{tenant_id:uuid}`, `{tenant_id:str}`).
+TENANT_PARAM_RE = re.compile(r"\{tenant_id(:[^}]*)?\}")
 
 
 class TenantRouteError(RuntimeError):
@@ -58,7 +62,7 @@ def check_tenant_routes(app: FastAPI) -> None:
     unguarded = [
         f"{getattr(route, 'name', '?')} {path}"
         for path, _, route in iter_routes(app)
-        if "{tenant_id}" in path and not isinstance(route, TenantScopedRoute)
+        if TENANT_PARAM_RE.search(path) and not isinstance(route, TenantScopedRoute)
     ]
     if unguarded:
         raise TenantRouteError(

@@ -17,6 +17,7 @@ from app.auth.bootstrap import ensure_bootstrap_owner
 from app.auth.oidc import OidcClient
 from app.auth.ratelimit import SlidingWindowLimiter
 from app.auth.tenant_guard import check_tenant_routes
+from app.crypto.envelope import load_public_key
 from app.settings import Settings, SettingsError, get_settings
 
 OIDC_STATE_COOKIE = "gamut_oidc"
@@ -32,6 +33,8 @@ def create_app(
     secret = settings.secret_key.get_secret_value() if settings.secret_key else ""
     if not secret:
         raise SettingsError("the web app requires: GAMUT_SECRET_KEY")
+    # Only the public key: the web process can seal credentials but never open them.
+    credential_public_key = load_public_key(settings.credential_public_key)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -46,6 +49,7 @@ def create_app(
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+    app.state.credential_public_key = credential_public_key
     app.state.rate_limiter = SlidingWindowLimiter()
     app.state.oidc = OidcClient(settings, oidc_transport) if settings.oidc_enabled else None
     # Holds only the OIDC state and nonce between /api/auth/login and the callback:

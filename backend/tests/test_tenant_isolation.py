@@ -22,18 +22,20 @@ MALFORMED = b'{"not": json'
 
 
 def _tenant_routes(app: FastAPI) -> list[tuple[str, str]]:
-    from app.auth.tenant_guard import iter_routes
+    from app.auth.tenant_guard import TENANT_PARAM_RE, iter_routes
 
     return sorted(
         (method, path)
         for path, methods, _ in iter_routes(app)
-        if "{tenant_id}" in path
+        if TENANT_PARAM_RE.search(path)
         for method in methods
     )
 
 
 def _fill(path: str, tenant_id: uuid.UUID) -> str:
-    path = path.replace("{tenant_id}", str(tenant_id))
+    from app.auth.tenant_guard import TENANT_PARAM_RE
+
+    path = TENANT_PARAM_RE.sub(str(tenant_id), path)
     return re.sub(r"\{[^}]+\}", lambda _: str(uuid.uuid4()), path)
 
 
@@ -147,3 +149,40 @@ def test_unguarded_tenant_route_is_refused_at_startup() -> None:
     app.include_router(router)
     with pytest.raises(TenantRouteError, match="leaky"):
         check_tenant_routes(app)
+
+
+@pytest.mark.parametrize("param", ["{tenant_id}", "{tenant_id:uuid}", "{tenant_id:str}"])
+def test_unguarded_converter_route_is_refused(param: str) -> None:
+    from app.auth.tenant_guard import TenantRouteError, check_tenant_routes
+
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get(f"/api/tenants/{param}/leaky")
+    def leaky(tenant_id: str) -> dict[str, str]:
+        return {"tenant_id": tenant_id}
+
+    app.include_router(router)
+    with pytest.raises(TenantRouteError, match="leaky"):
+        check_tenant_routes(app)
+
+
+def test_guard_covers_converter_routes(
+    make_client: Callable[..., TestClient],
+    login_as: Login,
+    two_tenants: tuple[Tenant, Tenant, User],
+) -> None:
+    from app.auth.tenant_guard import TenantScopedRoute
+
+    a, b, user = two_tenants
+    router = APIRouter(route_class=TenantScopedRoute)
+
+    @router.get("/api/tenants/{tenant_id:uuid}/probe")
+    def probe(tenant_id: uuid.UUID) -> dict[str, str]:
+        return {"tenant_id": str(tenant_id)}
+
+    client = make_client()
+    client.app.include_router(router)  # type: ignore[attr-defined]
+    login_as(client, user)
+    assert client.get(f"/api/tenants/{a.id}/probe").status_code == 200
+    assert client.get(f"/api/tenants/{b.id}/probe").status_code == 404

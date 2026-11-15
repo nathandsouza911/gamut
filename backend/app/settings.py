@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Worker only: path of the private key file (mounted as a Compose secret).
     credential_private_key_file: Path | None = None
 
+    # Worker: where each job decrypts its tenant's GAM files (a tmpfs in Compose).
+    job_dir: Path = Path("/run/gamut-jobs")
+
     source_url: str = "https://github.com/OWNER/gamut"
     gam_bin: str = "gam"
 

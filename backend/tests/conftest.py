@@ -21,6 +21,7 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from fastapi.testclient import TestClient
 from joserfc import jwt
 from joserfc.jwk import RSAKey
@@ -156,8 +157,19 @@ TEST_SECRET_KEY = "test-secret-key-not-for-production-0123456789"
 BASE_URL = "https://testserver"  # https, so Secure cookies round-trip
 
 
+@pytest.fixture(scope="session")
+def credential_keys() -> tuple[X25519PrivateKey, str]:
+    """A credential key pair for the session: (private key, base64 public key)."""
+    from app.crypto.envelope import encode_public_key
+
+    private = X25519PrivateKey.generate()
+    return private, encode_public_key(private.public_key())
+
+
 @pytest.fixture
-def web_settings(app_engine: Engine) -> Callable[..., Settings]:
+def web_settings(
+    app_engine: Engine, credential_keys: tuple[X25519PrivateKey, str]
+) -> Callable[..., Settings]:
     """Builds web-role settings for the test database (overrides as keyword args)."""
 
     def _make(**overrides: Any) -> Settings:
@@ -165,7 +177,7 @@ def web_settings(app_engine: Engine) -> Callable[..., Settings]:
             "role": "web",
             "database_url": _env("TEST_APP_DATABASE_URL"),
             "secret_key": TEST_SECRET_KEY,
-            "credential_public_key": "test-public-key",
+            "credential_public_key": credential_keys[1],
         }
         fields.update(overrides)
         return load_settings(**fields)
@@ -348,3 +360,15 @@ def fake_gam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGa
     get_settings.cache_clear()
     yield FakeGam(directory)
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def job_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gam: FakeGam) -> Path:
+    """GAMUT_JOB_DIR (where jobs materialize credentials) in a temporary directory."""
+    from app.settings import get_settings
+
+    directory = tmp_path / "jobs"
+    directory.mkdir()
+    monkeypatch.setenv("GAMUT_JOB_DIR", str(directory))
+    get_settings.cache_clear()
+    return directory
