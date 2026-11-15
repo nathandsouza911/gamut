@@ -3,10 +3,24 @@
 
 run_steps opens the tenant's sealed GAM files with the worker's private key, writes them
 into one per-job directory (app.crypto.envelope.materialize) for the whole run, and
-executes each unfinished step in order through its workflow. After each step it stores
+executes each runnable step in order through its workflow. After each step it stores
 the outcome, appends an audit event and commits, so progress is visible while the job
-runs. It stops at the first failed step, or at a waiting step (the worker loop polls it
-later). When the job ends it calls the workflow's on_finished hook.
+runs. It stops at the first failed step, or at a waiting step (the worker loop claims
+the job again when the step is due and calls the workflow's execute() for it again).
+When the job ends it calls the workflow's on_finished hook.
+
+Runnable steps are `pending` ones, `running` ones (left behind by a worker whose lease
+expired; steps are safe to run twice) and `waiting` ones. A `failed` step never runs
+again by itself: app.jobs.queue.retry_step sets it back to pending.
+
+No database transaction is open while a step executes (GAM can run for minutes): the
+session is committed first and objects stay loaded (expire_on_commit is off during the
+run). A workflow that queries through ctx.session should finish its transaction before
+it starts GAM.
+
+GAM exits that mean "Google's rate limit or quota was hit" (exit 9 with one of the
+quota reasons in GAM's error line; see docs/decisions.md) do not fail the step: it
+waits with backoff and runs again, at most MAX_QUOTA_RETRIES times in a row.
 
 Stored output is capped and scrubbed of the credential values it could contain (tokens,
 client secrets, private keys), in case GAM ever prints one.
@@ -14,6 +28,8 @@ client secrets, private keys), in case GAM ever prints one.
 
 import json
 import logging
+import re
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,13 +42,23 @@ from app.audit.chain import append_event
 from app.crypto.envelope import SealedBundle, materialize, open_bundle
 from app.gam.commands import redact_argv
 from app.gam.runner import gam_version
-from app.models import Job, JobStatus, JobStep, StepStatus, Tenant, TenantCredential, User
+from app.models import (
+    Job,
+    JobStatus,
+    JobStep,
+    StepStatus,
+    Tenant,
+    TenantCredential,
+    TenantStatus,
+    User,
+)
 from app.settings import get_settings
-from app.workflows.base import StepContext, StepOutcome, Workflow, get_workflow
+from app.workflows.base import StepContext, StepOutcome, Workflow, combined_output, get_workflow
 
 log = logging.getLogger(__name__)
 
 STORED_OUTPUT_MAX = 64_000
+ERROR_MESSAGE_MAX = 2_000
 REDACTED = "[redacted]"
 # JSON keys in GAM's credential files whose values are secret.
 SECRET_KEYS = frozenset(
@@ -40,7 +66,25 @@ SECRET_KEYS = frozenset(
      "private_key_id"}
 )
 _MIN_SECRET_LEN = 8
-_UNFINISHED = (StepStatus.pending, StepStatus.running, StepStatus.waiting, StepStatus.failed)
+_RUNNABLE = (StepStatus.pending, StepStatus.running, StepStatus.waiting)
+
+# Waiting steps: next poll after min(30 * 2**attempts, 900) seconds.
+BACKOFF_BASE_S = 30
+BACKOFF_MAX_S = 900
+
+# GAM 7.52.3 exits with HTTP_ERROR_RC (9) when an API call still fails after its own
+# retries; the error line is "ERROR: <status>: <reason> - <message>". These reasons are
+# Google's rate-limit and quota errors (gam/gamlib/glgapi.py DEFAULT_RETRY_REASONS).
+RATE_LIMIT_EXIT_CODE = 9
+_RATE_LIMIT_REASON = re.compile(
+    r"\b\d{3}: (?:quotaExceeded|rateLimitExceeded|userRateLimitExceeded"
+    r"|sharingRateLimitExceeded) - "
+)
+MAX_QUOTA_RETRIES = 6
+
+
+class PrepareError(Exception):
+    """The job cannot start; the message is safe to show to an operator."""
 
 
 def _collect(value: Any, found: set[str]) -> None:
@@ -73,11 +117,65 @@ def scrub(text: str, secrets: list[str]) -> str:
     return text
 
 
+def backoff_seconds(attempts: int, poll_after_s: int | None = None) -> int:
+    """Delay before polling a waiting step again: min(30 * 2**attempts, 900) seconds.
+
+    `attempts` is how many times the step has already waited. A workflow may ask for a
+    longer delay (poll_after_s); the result never exceeds 900 seconds.
+    """
+    delay: int = BACKOFF_BASE_S * 2 ** min(max(attempts, 0), 10)
+    return min(max(delay, poll_after_s or 0), BACKOFF_MAX_S)
+
+
+def is_rate_limited(exit_code: int | None, output: str) -> bool:
+    """True when GAM gave up on a Google rate-limit or quota error."""
+    return exit_code == RATE_LIMIT_EXIT_CODE and bool(_RATE_LIMIT_REASON.search(output))
+
+
+def open_tenant_files(
+    session: Session, tenant: Tenant, private_key: X25519PrivateKey
+) -> dict[str, bytes]:
+    """The tenant's decrypted GAM files. Raises PrepareError (operator-safe message)."""
+    credential = session.get(TenantCredential, tenant.id)
+    if credential is None:
+        raise PrepareError("The tenant has no stored credentials. Upload its GAM files first.")
+    sealed = SealedBundle(
+        credential.ciphertext, credential.nonce, credential.wrapped_key, credential.key_version
+    )
+    try:
+        return open_bundle(sealed, private_key, associated_data=tenant.id.bytes)
+    except (InvalidTag, ValueError):
+        log.warning("credentials for tenant %s could not be decrypted", tenant.id)
+        raise PrepareError(
+            "The stored credentials could not be decrypted (wrong credential key?). "
+            "Upload the tenant's GAM files again."
+        ) from None
+    except Exception as exc:
+        log.warning("credentials for tenant %s: %s", tenant.id, type(exc).__name__)
+        raise PrepareError(
+            f"The stored credentials could not be opened ({type(exc).__name__})."
+        ) from None
+
+
+def error_outcome(exc: Exception) -> StepOutcome:
+    """A failed outcome for an exception raised by a workflow.
+
+    A plain ValueError carries an operator-readable message (the Workflow contract), so
+    it is shown; anything else is shown only by type and logged.
+    """
+    if type(exc) is ValueError:
+        log.info("step raised ValueError")
+        return StepOutcome(status=StepStatus.failed, output=str(exc)[:ERROR_MESSAGE_MAX])
+    log.error("step raised %s", type(exc).__name__, exc_info=exc)
+    return StepOutcome(status=StepStatus.failed, output=f"internal error ({type(exc).__name__})")
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _actor(session: Session, job: Job) -> str:
+def job_actor(session: Session, job: Job) -> str:
+    """Audit actor for work done on behalf of `job`: its creator's email, or "system"."""
     if job.created_by is not None:
         user = session.get(User, job.created_by)
         if user is not None:
@@ -85,9 +183,31 @@ def _actor(session: Session, job: Job) -> str:
     return "system"
 
 
-def _target(job: Job, tenant: Tenant) -> str:
+def job_target(job: Job, tenant: Tenant) -> str:
     target = job.params.get("target") if isinstance(job.params, dict) else None
     return str(target) if target else tenant.primary_domain
+
+
+def _audit_step(
+    session: Session, *, job: Job, tenant: Tenant, step: JobStep, status: StepStatus,
+    exit_code: int | None, actor: str,
+) -> None:
+    append_event(
+        session,
+        actor=actor,
+        tenant_id=tenant.id,
+        action=f"job.step.{status.value}",
+        target=job_target(job, tenant),
+        details={
+            "job_id": str(job.id),
+            "workflow": job.workflow,
+            "step": step.key,
+            "position": step.position,
+            "argv": list(step.args),
+            "exit_code": exit_code,
+            "gam_version": job.gam_version,
+        },
+    )
 
 
 def _record(
@@ -108,43 +228,35 @@ def _record(
     if outcome.argv:
         step.args = redact_argv(outcome.argv)
     if outcome.status == StepStatus.waiting:
+        delay = backoff_seconds(step.poll_attempts, outcome.poll_after_s)
         step.poll_attempts += 1
-        step.next_poll_at = _now() + timedelta(seconds=outcome.poll_after_s or 60)
+        step.next_poll_at = _now() + timedelta(seconds=delay)
     else:
         step.next_poll_at = None
         step.finished_at = _now()
     session.flush()
-    append_event(
-        session,
-        actor=actor,
-        tenant_id=tenant.id,
-        action=f"job.step.{outcome.status.value}",
-        target=_target(job, tenant),
-        details={
-            "job_id": str(job.id),
-            "workflow": job.workflow,
-            "step": step.key,
-            "position": step.position,
-            "argv": list(step.args),
-            "exit_code": outcome.exit_code,
-            "gam_version": job.gam_version,
-        },
-    )
+    _audit_step(session, job=job, tenant=tenant, step=step, status=outcome.status,
+                exit_code=outcome.exit_code, actor=actor)
     session.commit()
 
 
 def _finish(
-    session: Session, job: Job, tenant: Tenant, workflow: Workflow, status: JobStatus, actor: str
+    session: Session, job: Job, tenant: Tenant, workflow: Workflow, status: JobStatus,
+    actor: str, reason: str | None = None,
 ) -> None:
     job.status = status
     job.finished_at = _now()
     job.lease_until = None
     session.flush()
     workflow.on_finished(session, job)
+    details: dict[str, Any] = {
+        "job_id": str(job.id), "workflow": job.workflow, "gam_version": job.gam_version
+    }
+    if reason:
+        details["reason"] = reason
     append_event(
         session, actor=actor, tenant_id=tenant.id, action=f"job.{status.value}",
-        target=_target(job, tenant),
-        details={"job_id": str(job.id), "workflow": job.workflow, "gam_version": job.gam_version},
+        target=job_target(job, tenant), details=details,
     )
     session.commit()
 
@@ -153,78 +265,140 @@ def _fail_before_start(
     session: Session, job: Job, tenant: Tenant, workflow: Workflow, steps: list[JobStep],
     reason: str, actor: str,
 ) -> None:
-    step = steps[0]
-    step.started_at = _now()
-    _record(
-        session, job=job, tenant=tenant, step=step,
-        outcome=StepOutcome(status=StepStatus.failed, output=reason), secrets=[], actor=actor,
+    """Fail the job without running GAM: the first runnable step carries `reason`."""
+    if steps:
+        step = steps[0]
+        step.started_at = step.started_at or _now()
+        _record(
+            session, job=job, tenant=tenant, step=step,
+            outcome=StepOutcome(status=StepStatus.failed, output=reason), secrets=[],
+            actor=actor,
+        )
+    _finish(session, job, tenant, workflow, JobStatus.failed, actor, reason=reason)
+
+
+def _quota_wait(step: JobStep, outcome: StepOutcome) -> StepOutcome:
+    """Turn a rate-limited GAM failure into a waiting outcome (bounded)."""
+    if outcome.status != StepStatus.failed or not is_rate_limited(
+        outcome.exit_code, outcome.output
+    ):
+        return outcome
+    previous = dict(step.data) if isinstance(step.data, dict) else {}
+    retries = int(previous.get("quota_retries", 0))
+    if retries >= MAX_QUOTA_RETRIES:
+        return StepOutcome(
+            status=StepStatus.failed,
+            output=combined_output(
+                outcome.output,
+                f"Google's rate limit or quota was still reached after {retries} waits. "
+                "Retry the step later.",
+            ),
+            data=outcome.data, exit_code=outcome.exit_code, argv=outcome.argv,
+        )
+    return StepOutcome(
+        status=StepStatus.waiting,
+        output=combined_output(
+            outcome.output,
+            f"Google rate limit or quota reached; the step runs again later "
+            f"(wait {retries + 1} of {MAX_QUOTA_RETRIES}).",
+        ),
+        data={**previous, **outcome.data, "quota_retries": retries + 1},
+        exit_code=outcome.exit_code,
+        argv=outcome.argv,
     )
-    _finish(session, job, tenant, workflow, JobStatus.failed, actor)
 
 
 def run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> None:
-    """Run `job`'s unfinished steps in order (see the module docstring).
+    """Run `job`'s runnable steps in order (see the module docstring).
 
-    Sets: job.status running -> succeeded | failed (or waiting), job.started_at (first
-    run), job.gam_version, job.finished_at; per step status, started_at, exit_code,
-    output (scrubbed, capped), data, args (redacted argv actually run), finished_at or
-    next_poll_at/poll_attempts for waiting steps. Commits after each step.
+    Sets: job.status running -> succeeded | failed | waiting, job.started_at (first
+    run), job.gam_version, job.finished_at, job.lease_until (cleared when the job waits
+    or ends); per step status, started_at, exit_code, output (scrubbed, capped), data,
+    args (redacted argv actually run), finished_at or next_poll_at/poll_attempts for
+    waiting steps. Commits after each transition. A disabled tenant, missing or
+    undecryptable credentials, or a worker that cannot run GAM or create the job
+    directory fail the job with an operator-readable message on the first runnable step.
     """
+    previous = session.expire_on_commit
+    session.expire_on_commit = False  # no lazy loads (= transactions) while GAM runs
+    try:
+        _run_steps(session, job, private_key)
+    finally:
+        session.expire_on_commit = previous
+
+
+def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> None:
     tenant = session.get(Tenant, job.tenant_id)
     if tenant is None:
         return  # deleted; its jobs went with it
     workflow = get_workflow(job.workflow)
-    actor = _actor(session, job)
-    steps = [
-        s for s in session.scalars(
-            select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)
-        )
-        if s.status in _UNFINISHED
-    ]
+    actor = job_actor(session, job)
+    all_steps = list(session.scalars(
+        select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.position)
+    ))
+    steps = [s for s in all_steps if s.status in _RUNNABLE]
     job.status = JobStatus.running
     job.started_at = job.started_at or _now()
-    job.gam_version = gam_version()
+
+    if tenant.status == TenantStatus.disabled:
+        _fail_before_start(
+            session, job, tenant, workflow, steps,
+            "The tenant is disabled, so its jobs do not run. Enable the tenant, then retry "
+            "the step.", actor,
+        )
+        return
+    try:
+        job.gam_version = gam_version()
+    except Exception as exc:
+        log.warning("gam version failed: %s", type(exc).__name__)
+        _fail_before_start(
+            session, job, tenant, workflow, steps,
+            f"The worker could not run GAM ({type(exc).__name__}). Check the worker's GAM "
+            "installation and its job directory (GAMUT_JOB_DIR).", actor,
+        )
+        return
     session.commit()
+    if any(s.status == StepStatus.failed for s in all_steps):
+        # Only retry_step or skip_step resolve a failed step.
+        _finish(session, job, tenant, workflow, JobStatus.failed, actor)
+        return
     if not steps:
         _finish(session, job, tenant, workflow, JobStatus.succeeded, actor)
         return
 
-    credential = session.get(TenantCredential, tenant.id)
-    if credential is None:
-        _fail_before_start(
-            session, job, tenant, workflow, steps,
-            "The tenant has no stored credentials. Upload its GAM files first.", actor,
-        )
-        return
-    sealed = SealedBundle(
-        credential.ciphertext, credential.nonce, credential.wrapped_key, credential.key_version
-    )
     try:
-        files = open_bundle(sealed, private_key, associated_data=tenant.id.bytes)
-    except (InvalidTag, ValueError):
-        log.warning("credentials for tenant %s could not be decrypted", tenant.id)
-        _fail_before_start(
-            session, job, tenant, workflow, steps,
-            "The stored credentials could not be decrypted (wrong credential key?). "
-            "Upload the tenant's GAM files again.", actor,
-        )
+        files = open_tenant_files(session, tenant, private_key)
+    except PrepareError as exc:
+        _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
         return
     secrets = secret_values(files)
 
-    with materialize(files, base=get_settings().job_dir) as cfg_dir:
+    with ExitStack() as stack:
+        try:
+            cfg_dir = stack.enter_context(materialize(files, base=get_settings().job_dir))
+        except Exception as exc:
+            log.warning("job directory could not be prepared: %s", type(exc).__name__)
+            _fail_before_start(
+                session, job, tenant, workflow, steps,
+                f"The worker could not prepare the job directory ({type(exc).__name__}). "
+                "Check GAMUT_JOB_DIR on the worker.", actor,
+            )
+            return
         del files
         for step in steps:
             step.status = StepStatus.running
             step.started_at = step.started_at or _now()
-            session.commit()
+            session.flush()
+            _audit_step(session, job=job, tenant=tenant, step=step, status=StepStatus.running,
+                        exit_code=None, actor=actor)
+            session.commit()  # nothing stays open while GAM runs
             ctx = StepContext(session=session, tenant=tenant, job=job, step=step, cfg_dir=cfg_dir)
             try:
                 outcome = workflow.execute(step, ctx)
-            except Exception as exc:  # a workflow bug must not leave the step running
-                log.exception("step %s of job %s raised", step.key, job.id)
-                outcome = StepOutcome(
-                    status=StepStatus.failed, output=f"internal error ({type(exc).__name__})"
-                )
+            except Exception as exc:  # a workflow error must not leave the step running
+                session.rollback()
+                outcome = error_outcome(exc)
+            outcome = _quota_wait(step, outcome)
             _record(
                 session, job=job, tenant=tenant, step=step, outcome=outcome,
                 secrets=secrets, actor=actor,
@@ -234,6 +408,7 @@ def run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> None
                 return
             if outcome.status == StepStatus.waiting:
                 job.status = JobStatus.waiting
+                job.lease_until = None
                 session.commit()
                 return
     _finish(session, job, tenant, workflow, JobStatus.succeeded, actor)

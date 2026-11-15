@@ -21,7 +21,10 @@ def configure_engine(engine: Engine | None) -> None:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+        # hide_parameters: database errors (which get logged) never carry row values.
+        _engine = create_engine(
+            get_settings().database_url, pool_pre_ping=True, hide_parameters=True
+        )
     return _engine
 
 

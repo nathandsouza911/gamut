@@ -277,6 +277,8 @@ class ScheduledAction(Base):
         server_default=ScheduledStatus.scheduled.value,
     )
     result: Mapped[str | None] = mapped_column(Text)
+    # Set while a worker runs the action; an expired lease means the worker died.
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
 
 

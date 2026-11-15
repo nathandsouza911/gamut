@@ -92,9 +92,14 @@ def register(workflow: Workflow) -> Workflow:
     return workflow
 
 
-def get_workflow(name: str) -> Workflow:
+def load_builtin_workflows() -> None:
+    """Import the built-in workflow modules (they register workflows and action handlers)."""
     for module in BUILTIN_WORKFLOW_MODULES:
         importlib.import_module(module)
+
+
+def get_workflow(name: str) -> Workflow:
+    load_builtin_workflows()
     try:
         return _REGISTRY[name]
     except KeyError:

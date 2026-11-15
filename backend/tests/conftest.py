@@ -13,6 +13,7 @@ import uuid
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -372,3 +373,101 @@ def job_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gam: FakeGam) 
     monkeypatch.setenv("GAMUT_JOB_DIR", str(directory))
     get_settings.cache_clear()
     return directory
+
+
+# --- Ready tenants and an in-process worker (Task 6) --------------------------------
+
+TEST_GAM_FILES = {
+    "oauth2.txt": json.dumps(
+        {"client_id": "cid", "client_secret": "CS-test-secret", "refresh_token": "RT-test-token"}
+    ).encode(),
+    "oauth2service.json": json.dumps(
+        {"type": "service_account", "client_email": "sa@p.iam", "private_key": "PK-test-key"}
+    ).encode(),
+}
+
+
+@pytest.fixture
+def make_ready_tenant(
+    app_session: Session,
+    make_tenant: Callable[..., Tenant],
+    credential_keys: tuple[X25519PrivateKey, str],
+) -> Callable[..., Tenant]:
+    """An active tenant with an admin_email and sealed TEST_GAM_FILES (committed).
+
+    Its last health check is "now" unless overridden, so the worker's daily health
+    check leaves it alone.
+    """
+    from app.crypto.envelope import load_public_key, seal_bundle
+    from app.models import TenantCredential
+
+    def _make(**overrides: Any) -> Tenant:
+        tenant = make_tenant(**overrides)
+        if "admin_email" not in overrides:
+            tenant.admin_email = f"admin@{tenant.primary_domain}"
+        if "last_health_check_at" not in overrides:  # not due for the daily health check
+            tenant.last_health_check_at = datetime.now(UTC)
+        sealed = seal_bundle(
+            TEST_GAM_FILES, load_public_key(credential_keys[1]),
+            associated_data=tenant.id.bytes,
+        )
+        app_session.add(TenantCredential(
+            tenant_id=tenant.id, ciphertext=sealed.ciphertext, nonce=sealed.nonce,
+            wrapped_key=sealed.wrapped_key, key_version=sealed.key_version,
+            file_names=sorted(TEST_GAM_FILES),
+        ))
+        app_session.commit()
+        return tenant
+
+    return _make
+
+
+class WorkerDriver:
+    """Drives the worker loop in-process (no threads, no sleeping).
+
+    .tick()             one loop iteration (claim+run one job, due scheduled actions,
+                        daily health enqueue); returns True when it did any work
+    .drain(max_ticks)   tick until idle (bounded); returns the number of busy ticks
+    .make_due(job_id)   make the job's waiting steps due now (skip the backoff wait)
+    """
+
+    def __init__(self, private_key: X25519PrivateKey, session: Session) -> None:
+        self.key = private_key
+        self.session = session
+
+    def tick(self) -> bool:
+        from app.worker.loop import tick
+
+        busy = tick(self.key, worker_id="test-worker")
+        self.session.expire_all()
+        return busy
+
+    def drain(self, max_ticks: int = 25) -> int:
+        busy = 0
+        for _ in range(max_ticks):
+            if not self.tick():
+                return busy
+            busy += 1
+        raise AssertionError(f"the worker was still busy after {max_ticks} ticks")
+
+    def make_due(self, job_id: uuid.UUID) -> None:
+        with db.session_scope() as session:
+            session.execute(
+                text(
+                    "UPDATE job_steps SET next_poll_at = now() - interval '1 second'"
+                    " WHERE job_id = :j AND status = 'waiting'"
+                ),
+                {"j": job_id},
+            )
+        self.session.expire_all()
+
+
+@pytest.fixture
+def worker(
+    app_session: Session, credential_keys: tuple[X25519PrivateKey, str], job_dir: Path
+) -> WorkerDriver:
+    """An in-process worker using the fake gam and the test job directory."""
+    from app.gam.runner import clear_gam_version_cache
+
+    clear_gam_version_cache()
+    return WorkerDriver(credential_keys[0], app_session)

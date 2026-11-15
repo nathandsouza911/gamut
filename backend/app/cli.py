@@ -68,14 +68,33 @@ def gen_keys(args: list[str]) -> int:
 
 
 def worker() -> int:
-    """Check the worker's configuration and credential key. (The job loop is Task 6.)"""
+    """Run the job loop until SIGTERM or SIGINT (the job in progress finishes first).
+
+    Refuses to start (non-zero exit) without a usable credential private key.
+    """
+    import logging
+    import signal
+    import threading
+    from types import FrameType
+
     from app.crypto.envelope import load_private_key_or_die
     from app.settings import load_settings
+    from app.worker import loop
 
     settings = load_settings(role="worker")
-    load_private_key_or_die(settings)  # exits non-zero when missing or the example
-    print("gamut worker: credential private key loaded; the job loop is not implemented yet",
-          file=sys.stderr)
+    private_key = load_private_key_or_die(settings)  # exits non-zero when unusable
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    stop = threading.Event()
+
+    def request_stop(signum: int, frame: FrameType | None) -> None:
+        stop.set()
+
+    previous = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        loop.run_forever(stop, private_key, worker_id=loop.default_worker_id())
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     return 0
 
 

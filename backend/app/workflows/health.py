@@ -24,6 +24,7 @@ from app.models import Job, JobStatus, JobStep, StepStatus, Tenant
 from app.tenants.service import HEALTH_MESSAGE_MAX, apply_health_result
 from app.workflows.base import StepContext, StepOutcome, StepSpec, register, run_gam_step
 
+HEALTH_WORKFLOW = "health_check"
 SCOPES_NOT_AUTHORIZED_EXIT = 10
 PASSED = "Health check passed"
 
@@ -33,7 +34,7 @@ class HealthParams(BaseModel):
 
 
 class HealthCheck:
-    name = "health_check"
+    name = HEALTH_WORKFLOW
     params_model: type[BaseModel] = HealthParams
 
     def plan(self, params: HealthParams, tenant: Tenant) -> list[StepSpec]:

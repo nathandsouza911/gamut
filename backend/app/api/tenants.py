@@ -42,7 +42,7 @@ from app.auth.ratelimit import JOB_CREATE_LIMIT, rate_limit
 from app.auth.tenant_guard import TenantScopedRoute
 from app.db import session_scope
 from app.gam.validate import Email, assert_in_tenant
-from app.jobs.queue import create_job
+from app.jobs.queue import create_job, plan_job
 from app.models import Job, Membership, Role, Tenant, TenantStatus, User
 from app.tenants.service import (
     ALLOWED_FILES,
@@ -53,10 +53,10 @@ from app.tenants.service import (
     delete_tenant,
     store_credentials,
 )
+from app.workflows.health import HEALTH_WORKFLOW
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants"], route_class=TenantScopedRoute)
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
-HEALTH_WORKFLOW = "health_check"
 
 
 def _domain(value: str) -> str:
@@ -327,12 +327,13 @@ def _queue_health_check(db: Session, tenant: Tenant, user: User) -> Job:
     if tenant.status == TenantStatus.disabled:
         raise HTTPException(status.HTTP_409_CONFLICT, "disabled tenants are not health-checked")
     try:
-        return create_job(
-            db, tenant=tenant, workflow_name=HEALTH_WORKFLOW, params={},
-            created_by=user, actor=user.email,
-        )
+        planned = plan_job(HEALTH_WORKFLOW, {}, tenant)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+    return create_job(
+        db, tenant_id=tenant.id, workflow=planned.workflow, params=planned.params,
+        steps=planned.steps, actor=user, idempotency_key=f"health:{uuid.uuid4()}",
+    )
 
 
 @router.put("/{tenant_id}/credentials")
@@ -375,12 +376,15 @@ def put_credentials(
         health_job_id: uuid.UUID | None = None
         if tenant.status != TenantStatus.disabled and tenant.admin_email:
             try:
-                health_job_id = create_job(
-                    db, tenant=tenant, workflow_name=HEALTH_WORKFLOW, params={},
-                    created_by=owner, actor=owner.email,
-                ).id
+                planned = plan_job(HEALTH_WORKFLOW, {}, tenant)
             except ValueError:
-                health_job_id = None
+                planned = None
+            if planned is not None:
+                health_job_id = create_job(
+                    db, tenant_id=tenant.id, workflow=planned.workflow, params=planned.params,
+                    steps=planned.steps, actor=owner,
+                    idempotency_key=f"health-upload:{tenant.id}:{row.uploaded_at.isoformat()}",
+                ).id
         return CredentialsOut(
             file_names=list(row.file_names),
             uploaded_at=row.uploaded_at,

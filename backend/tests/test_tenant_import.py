@@ -384,7 +384,7 @@ def test_health_check_route_rules(
     login_as(client, admin)
     r = client.post(f"/api/tenants/{stored.id}/health-check")
     assert r.status_code == 202
-    created = _events(app_session, "job.create")[-1]
+    created = _events(app_session, "job.created")[-1]
     assert created.actor == admin.email and created.details["workflow"] == "health_check"
 
     stored.status = TenantStatus.disabled
