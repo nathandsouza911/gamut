@@ -68,7 +68,7 @@ services:
       # Addresses whose X-Forwarded-For is trusted: by default the gateway of the pinned
       # network below, which is where traffic from a reverse proxy on the host arrives
       # (the published port is bound to 127.0.0.1, so only the host can connect).
-      GAMUT_FORWARDED_ALLOW_IPS: ${GAMUT_FORWARDED_ALLOW_IPS:-172.30.80.1}
+      GAMUT_FORWARDED_ALLOW_IPS: ${GAMUT_FORWARDED_ALLOW_IPS:-${GAMUT_NETWORK_GATEWAY:-10.78.80.1}}
       GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/OWNER/gamut}
     ports:
       - "127.0.0.1:8080:8080"
@@ -112,12 +112,13 @@ secrets:
 
 networks:
   default:
-    # Pinned so the reverse-proxy trust above has a known address. Change both this subnet
-    # and GAMUT_FORWARDED_ALLOW_IPS (to the subnet's .1) if it clashes with your network.
+    # Pinned so the reverse-proxy trust above has a known address. If the subnet clashes
+    # with a network on your host ("Pool overlaps"), set GAMUT_NETWORK_SUBNET and
+    # GAMUT_NETWORK_GATEWAY (the subnet's .1) in .env; the proxy trust follows the gateway.
     ipam:
       config:
-        - subnet: 172.30.80.0/24
-          gateway: 172.30.80.1
+        - subnet: ${GAMUT_NETWORK_SUBNET:-10.78.80.0/24}
+          gateway: ${GAMUT_NETWORK_GATEWAY:-10.78.80.1}
 
 volumes:
   gamut-db:

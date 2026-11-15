@@ -81,7 +81,7 @@ Session cookies are `Secure`. Browsers accept them on `http://127.0.0.1` for loc
 
 Use a reverse proxy that terminates TLS and forwards to `127.0.0.1:8080`; a Caddy example is in [threat-model.md](threat-model.md). Never publish port 8080 on a public interface.
 
-`GAMUT_FORWARDED_ALLOW_IPS` names the addresses whose `X-Forwarded-For` header GAMUT believes, so the login rate limit counts each real client separately. Compose pins its network to `172.30.80.0/24`. A proxy running on the host reaches the published port from the network gateway `172.30.80.1`, which is the default. Without a trusted proxy address all clients would share one login bucket (10 attempts per minute for everybody). If `172.30.80.0/24` clashes with a network you use, change the subnet and gateway in `docker-compose.yml` and set `GAMUT_FORWARDED_ALLOW_IPS` to the new gateway. A proxy running as another Compose service should be listed by its address on that network instead.
+`GAMUT_FORWARDED_ALLOW_IPS` names the addresses whose `X-Forwarded-For` header GAMUT believes, so the login rate limit counts each real client separately. Compose pins its network to `10.78.80.0/24`. A proxy running on the host reaches the published port from the network gateway `10.78.80.1`, which is the default. Without a trusted proxy address all clients would share one login bucket (10 attempts per minute for everybody). If that subnet clashes with a network on your host (`docker compose up` fails with `Pool overlaps`), set `GAMUT_NETWORK_SUBNET` and `GAMUT_NETWORK_GATEWAY` in `.env`; the trusted address follows the gateway. A proxy running as another Compose service should be listed by its address on that network instead.
 
 ## 7. Add a tenant
 
