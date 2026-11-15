@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copy .env.example to .env first. Production: docker compose up -d
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gamut
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: gamut
+    volumes:
+      - gamut-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamut -d gamut"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+    image: gamut-web
+    command: gamut web
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+    image: gamut-worker
+    command: gamut worker
+    user: "10001"
+    read_only: true
+    tmpfs:
+      - /run/gamut-jobs:mode=0700,uid=10001
+    env_file: .env
+    environment:
+      GAMUT_CREDENTIAL_PRIVATE_KEY_FILE: /run/secrets/credential_private_key
+    secrets:
+      - credential_private_key
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+secrets:
+  credential_private_key:
+    file: ${GAMUT_PRIVATE_KEY_PATH:-./secrets/credential_private_key}
+
+volumes:
+  gamut-db:

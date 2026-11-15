@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Test harness for hosts without Python 3.12 / Linux (for example Windows).
+# Usage: docker compose -f docker-compose.test.yml run --rm tests pytest -v
+services:
+  testdb:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gamut
+      POSTGRES_PASSWORD: gamut-test
+      POSTGRES_DB: gamut_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamut -d gamut_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev
+    working_dir: /src/backend
+    environment:
+      TEST_DATABASE_URL: postgresql+psycopg://gamut:gamut-test@testdb:5432/gamut_test
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # Whole repo, read-only: tests also read LICENSE and scripts/. Caches go to /tmp.
+      - .:/src:ro
+    depends_on:
+      testdb:
+        condition: service_healthy
