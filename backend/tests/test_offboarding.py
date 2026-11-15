@@ -3,7 +3,7 @@
 
 Jobs are created the way the UI creates them: preview, then confirm with the preview
 token. Step order (ruling R10, docs/decisions.md): reset_password, signout, deprovision,
-auto_reply, suspend, remove_groups, drive_transfer, schedule_delete.
+auto_reply, suspend, record_groups, remove_groups, drive_transfer, schedule_delete.
 """
 
 import json
@@ -165,7 +165,7 @@ def test_full_run_issues_steps_in_order(
     assert created["status"] == "queued"
     assert [s["key"] for s in created["steps"]] == [
         "reset_password", "signout", "deprovision", "auto_reply", "suspend",
-        "remove_groups", "drive_transfer", "schedule_delete",
+        "record_groups", "remove_groups", "drive_transfer", "schedule_delete",
     ]
 
     worker.drain()
@@ -332,39 +332,113 @@ def test_auto_reply_text_is_not_stored_in_clear(
 # --- Groups --------------------------------------------------------------------------
 
 def test_groups_recorded_before_removal(
-    off: Offboard, fake_gam: Any, worker: WorkerDriver
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
 ) -> None:
     d = off.domain
+    both = [
+        {"group": f"staff@{d}", "role": "MEMBER", "status": "ACTIVE", "delivery": "ALL_MAIL"},
+        {"group": f"owners@{d}", "role": "OWNER", "status": "ACTIVE", "delivery": "DIGEST"},
+    ]
     fake_gam.scenario([
         _not_suspended(off.user),
         {"match": ["user", off.user, "print", "groups"], "stdout": GROUPS_CSV.format(d=d)},
         {"match": ["user", off.user, "delete", "groups"], "exit": 50, "stderr": "boom\n"},
     ])
     created = off.create(off.only(remove_groups=True))
+    assert [s["key"] for s in created["steps"]] == ["suspend", "record_groups", "remove_groups"]
     worker.drain()
     argvs = _argvs(fake_gam)
     assert argvs.index(["user", off.user, "print", "groups"]) < argvs.index(
         ["user", off.user, "delete", "groups"])
-    step = off.steps(created["id"])["remove_groups"]
-    # The removal failed, but the list it was about to remove is kept for a restore.
-    assert step.status == StepStatus.failed
-    assert step.data["groups"] == [
-        {"group": f"staff@{d}", "role": "MEMBER", "status": "ACTIVE", "delivery": "ALL_MAIL"},
-        {"group": f"owners@{d}", "role": "OWNER", "status": "ACTIVE", "delivery": "DIGEST"},
-    ]
+    steps = off.steps(created["id"])
+    # The list is committed by its own step, before the removal starts.
+    assert steps["record_groups"].status == StepStatus.succeeded
+    assert steps["record_groups"].data["groups"] == both
+    assert steps["remove_groups"].status == StepStatus.failed
+    assert f"staff@{d}" in (steps["remove_groups"].output or "")
+    recorded = _events(app_session, "job.step.succeeded")
+    assert [e.details["data"]["groups"] for e in recorded
+            if e.details["step"] == "record_groups"] == [both]
 
-    # Retry after a partial removal: GAM now lists one group; the record keeps both.
+    # The whole job runs again after a partial removal: GAM now lists one group, and
+    # the record still holds both.
     fake_gam.scenario([
+        {"match": ["info", "user", off.user],
+         "stdout": json.dumps({"primaryEmail": off.user, "suspended": True}) + "\n"},
         {"match": ["user", off.user, "print", "groups"],
          "stdout": "User,Group,Role,Status,Delivery\n"
                    f"{off.user},owners@{d},OWNER,ACTIVE,DIGEST\n"},
     ])
-    r = off.client.post(off.url(f"/jobs/{created['id']}/steps/{step.id}/retry"))
-    assert r.status_code == 200, r.text
+    _requeue(app_session, created["id"])
     worker.drain()
-    step = off.steps(created["id"])["remove_groups"]
-    assert step.status == StepStatus.succeeded
-    assert [g["group"] for g in step.data["groups"]] == [f"staff@{d}", f"owners@{d}"]
+    steps = off.steps(created["id"])
+    assert steps["remove_groups"].status == StepStatus.succeeded
+    assert steps["record_groups"].data["groups"] == both
+
+
+def _requeue(session: Session, job_id: str, only: str | None = None) -> None:
+    """Make every step (or only the step `only`) pending again and queue the job."""
+    jid = uuid.UUID(job_id)
+    if only is None:
+        session.execute(update(JobStep).where(JobStep.job_id == jid)
+                        .values(status=StepStatus.pending))
+    else:
+        session.execute(update(JobStep).where(JobStep.job_id == jid)
+                        .values(status=StepStatus.succeeded))
+        session.execute(update(JobStep).where(JobStep.job_id == jid, JobStep.key == only)
+                        .values(status=StepStatus.pending))
+    session.execute(update(Job).where(Job.id == jid).values(status=JobStatus.queued))
+    session.commit()
+
+
+def test_failing_rerun_keeps_recorded_step_data(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    """An exception in a re-run must not wipe what earlier runs recorded."""
+    u, m, d = off.user, off.manager, off.domain
+    soon = datetime.now(UTC) + timedelta(minutes=1)
+    fake_gam.scenario([
+        _not_suspended(u),
+        {"match": ["user", u, "print", "groups"], "stdout": GROUPS_CSV.format(d=d)},
+        {"match": ["print", "datatransfers"], "replies": [
+            {"stdout": TRANSFER_HEADER},
+            {"stdout": TRANSFER_HEADER + _transfer_row("T7", "failed", soon, u, m)},
+            {"stdout": TRANSFER_HEADER + _transfer_row("T7", "failed", soon, u, m)},
+            {"stdout": TRANSFER_HEADER + _transfer_row("T7", "failed", soon, u, m)
+             + _transfer_row("T8", "pending", soon, u, m)},
+        ]},
+    ])
+    created = off.create(off.only(remove_groups=True, transfer_drive_to=m))
+    worker.drain()  # T7 fails
+    steps = off.steps(created["id"])
+    assert steps["drive_transfer"].data["failed_transfer_ids"] == ["T7"]
+    retry = f"/jobs/{created['id']}/steps/{steps['drive_transfer'].id}/retry"
+    assert off.client.post(off.url(retry)).status_code == 200
+    worker.drain()  # a new transfer, T8, is waiting
+    steps = off.steps(created["id"])
+    assert steps["drive_transfer"].data["transfer_id"] == "T8"
+    groups = steps["record_groups"].data["groups"]
+    assert len(groups) == 2
+
+    # GAM now answers both reads with output that cannot be parsed (ValueError).
+    fake_gam.scenario([
+        _not_suspended(u),
+        {"match": ["user", u, "print", "groups"], "stdout": "ERROR: something odd\n"},
+        {"match": ["print", "datatransfers"], "stdout": "ERROR: something odd\n"},
+    ])
+    _requeue(app_session, created["id"], only="record_groups")
+    worker.drain()
+    step = off.steps(created["id"])["record_groups"]
+    assert step.status == StepStatus.failed
+    assert "unexpected output" in (step.output or "")
+    assert step.data["groups"] == groups  # kept
+
+    _requeue(app_session, created["id"], only="drive_transfer")
+    worker.drain()
+    step = off.steps(created["id"])["drive_transfer"]
+    assert step.status == StepStatus.failed
+    assert step.data["transfer_id"] == "T8"
+    assert step.data["failed_transfer_ids"] == ["T7"]
 
 
 # --- Drive transfer ------------------------------------------------------------------

@@ -22,6 +22,9 @@ GAM exits that mean "Google's rate limit or quota was hit" (exit 9 with one of t
 quota reasons in GAM's error line; see docs/decisions.md) do not fail the step: it
 waits with backoff and runs again, at most MAX_QUOTA_RETRIES times in a row.
 
+A step that raises keeps the data earlier runs stored (kept_data); an outcome the
+workflow returns replaces it.
+
 Stored output is capped and scrubbed of the credential values it could contain (tokens,
 client secrets, private keys), in case GAM ever prints one.
 """
@@ -31,6 +34,7 @@ import logging
 import re
 import uuid
 from contextlib import ExitStack
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -261,8 +265,21 @@ def _audit_step(
             "argv": list(step.args),
             "exit_code": exit_code,
             "gam_version": job.gam_version,
+            # What the step recorded (for example the group list kept for a restore),
+            # once it has a result. The audit log outlives the job rows.
+            **({"data": step.data} if status != StepStatus.running and step.data else {}),
         },
     )
+
+
+def kept_data(step: JobStep) -> dict[str, Any]:
+    """The step's data as last committed, for outcomes that carry no data of their own.
+
+    A step that ends in an exception (error_outcome) or fails before GAM runs keeps
+    what earlier runs recorded (a group list, a transfer id). Outcomes a workflow
+    returns itself replace the data as before, so a workflow can still drop keys.
+    """
+    return dict(step.data) if isinstance(step.data, dict) else {}
 
 
 def _record(
@@ -326,7 +343,9 @@ def _fail_before_start(
         step.started_at = step.started_at or _now()
         _record(
             session, job=job, tenant=tenant, step=step,
-            outcome=StepOutcome(status=StepStatus.failed, output=reason), secrets=[],
+            outcome=StepOutcome(status=StepStatus.failed, output=reason,
+                                data=kept_data(step)),
+            secrets=[],
             actor=actor,
         )
     _finish(session, job, tenant, workflow, JobStatus.failed, actor, reason=reason)
@@ -472,8 +491,8 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             try:
                 outcome = workflow.execute(step, ctx)
             except Exception as exc:  # a workflow error must not leave the step running
-                session.rollback()
-                outcome = error_outcome(exc)
+                session.rollback()  # step.data reloads as last committed
+                outcome = replace(error_outcome(exc), data=kept_data(step))
             outcome = _quota_wait(step, outcome)
             _record(
                 session, job=job, tenant=tenant, step=step, outcome=outcome,

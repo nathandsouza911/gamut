@@ -73,7 +73,7 @@ def test_preview_has_no_side_effects(
     assert body["preview_token"]
     assert [s["key"] for s in body["steps"]] == [
         "reset_password", "signout", "deprovision", "auto_reply", "suspend",
-        "remove_groups", "drive_transfer", "schedule_delete",
+        "record_groups", "remove_groups", "drive_transfer", "schedule_delete",
     ]
     by_key = {s["key"]: s for s in body["steps"]}
     assert by_key["suspend"]["args_display"] == "gam update user leaver@acme.com suspended on"
@@ -82,6 +82,7 @@ def test_preview_has_no_side_effects(
     assert by_key["drive_transfer"]["args_display"] == (
         "gam create datatransfer leaver@acme.com gdrive boss@acme.org")
     assert by_key["schedule_delete"]["args_display"] == "gam delete user leaver@acme.com"
+    assert by_key["record_groups"]["args_display"] == "gam user leaver@acme.com print groups"
     assert all(s["title"] for s in body["steps"])
 
     assert _count(app_session, Job) == 0

@@ -12,8 +12,11 @@ Steps, in this order (ruling R10, docs/decisions.md):
                              settings on a suspended account are unconfirmed)
   suspend          always    `info user <u> quick formatjson` first; no change when the
                              account is already suspended
-  remove_groups    optional  `user <u> print groups` (CSV) is recorded in step.data
-                             ["groups"] first, then `user <u> delete groups`
+  record_groups    optional  `user <u> print groups` (CSV) into step.data["groups"],
+                             committed as its own step; re-runs add to the record
+  remove_groups    optional  `user <u> delete groups`, only after record_groups
+                             succeeded; shows the recorded list (both are planned when
+                             remove_groups is chosen)
   drive_transfer   optional  async; see _drive_transfer
   schedule_delete  optional  a `delete_user` scheduled action N days later; its handler
                              refuses unless the Drive transfer succeeded or was not chosen
@@ -283,7 +286,11 @@ class Offboarding:
         steps.append(StepSpec("suspend", "Suspend the account", suspend_user(user)))
         if params.remove_groups:
             steps.append(StepSpec(
-                "remove_groups", "Remove from all groups (the list is recorded first)",
+                "record_groups", "Record group memberships (kept so they can be restored)",
+                print_user_groups(user), optional=True,
+            ))
+            steps.append(StepSpec(
+                "remove_groups", "Remove from all groups",
                 remove_from_all_groups(user), optional=True,
             ))
         if manager is not None:
@@ -312,6 +319,7 @@ class Offboarding:
             "deprovision": self._plain,
             "auto_reply": self._auto_reply,
             "suspend": self._suspend,
+            "record_groups": self._record_groups,
             "remove_groups": self._remove_groups,
             "drive_transfer": self._drive_transfer,
             "schedule_delete": self._schedule_delete,
@@ -365,20 +373,36 @@ class Offboarding:
                                output=f"{user} is already suspended; no change was made.")
         return run_gam_step(args, ctx.cfg_dir)
 
+    def _record_groups(self, step: JobStep, ctx: StepContext, params: OffboardJobParams,
+                       user: Email, args: list[str]) -> StepOutcome:
+        """List the memberships and add them to the record (never shrinks it)."""
+        previous = _merge_groups((step.data or {}).get("groups"), [])
+        listing = _run_or_stop(args, ctx, {"groups": previous})
+        current = parse_user_groups_csv(listing.stdout)
+        groups = _merge_groups(previous, current)
+        return StepOutcome(
+            status=StepStatus.succeeded, data={"groups": groups}, exit_code=0, argv=args,
+            output=(f"{user} is a member of {len(current)} groups; {len(groups)} "
+                    "memberships are recorded."),
+        )
+
     def _remove_groups(self, step: JobStep, ctx: StepContext, params: OffboardJobParams,
                        user: Email, args: list[str]) -> StepOutcome:
-        previous = (step.data or {}).get("groups")
-        listing_args = print_user_groups(user)
-        listing = _run_or_stop(listing_args, ctx, {"groups": _merge_groups(previous, [])})
-        current = parse_user_groups_csv(listing.stdout)
-        data = {"groups": _merge_groups(previous, current)}
-        if not current:
-            return StepOutcome(status=StepStatus.succeeded, data=data, exit_code=0,
-                               argv=listing_args,
-                               output=f"{user} is not a member of any group.")
+        # A separate, short read: ctx.session must not commit, and no transaction may
+        # stay open on it while GAM runs.
+        with Session(bind=ctx.session.get_bind()) as read:
+            record = read.execute(
+                select(JobStep.status, JobStep.data)
+                .where(JobStep.job_id == ctx.job.id, JobStep.key == "record_groups")
+            ).first()
+        if record is None or record.status != StepStatus.succeeded:
+            raise ValueError("The group list has not been recorded (the record_groups step "
+                             "did not succeed), so no group was removed.")
+        groups = _merge_groups((record.data or {}).get("groups"), [])
+        names = ", ".join(g["group"] for g in groups) or "none"
         outcome = run_gam_step(args, ctx.cfg_dir)
-        recorded = f"Recorded {len(current)} group memberships before removing them."
-        return replace(outcome, data=data, output=combined_output(recorded, outcome.output))
+        return replace(outcome, data={"groups": groups}, output=combined_output(
+            f"Recorded memberships ({len(groups)}): {names}", outcome.output))
 
     def _drive_transfer(self, step: JobStep, ctx: StepContext, params: OffboardJobParams,
                         user: Email, args: list[str]) -> StepOutcome:
