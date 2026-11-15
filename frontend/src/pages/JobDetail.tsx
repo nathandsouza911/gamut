@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useEffect, useState } from "react";
-import { api, type Job } from "../api";
+import { ApiError, api, type Job } from "../api";
 import ErrorText, { messageOf } from "../components/ErrorText";
 
 const ACTIVE = new Set(["queued", "running", "waiting"]);
 const POLL_MS = 2000;
+// Errors that will not go away by asking again: polling stops. Anything else (network
+// errors, 5xx, 429) is shown and polling goes on.
+const PERMANENT = new Set([401, 403, 404]);
 
 interface Props {
   tenantId: string;
@@ -32,7 +35,12 @@ export default function JobDetail({ tenantId, jobId, canOperate }: Props) {
         setError(null);
         if (ACTIVE.has(j.status)) timer = setTimeout(() => void tick(), POLL_MS);
       } catch (e) {
-        if (alive) setError(messageOf(e));
+        if (!alive) return;
+        setError(messageOf(e));
+        // Keep the last known job on screen and ask again, unless the error is final.
+        if (!(e instanceof ApiError && PERMANENT.has(e.status))) {
+          timer = setTimeout(() => void tick(), POLL_MS);
+        }
       }
     };
     void tick();
@@ -68,6 +76,15 @@ export default function JobDetail({ tenantId, jobId, canOperate }: Props) {
         {job.created_by ?? "system"} | {when(job.created_at)}
         {job.finished_at ? ` | finished ${when(job.finished_at)}` : ""}
       </p>
+      {failed && job.account_suspended === false ? (
+        <div role="status" className="warning">
+          <strong>The account is NOT suspended yet.</strong> The job stopped before its
+          suspend step succeeded, so {job.target ?? "the user"} can still sign in.
+          {canOperate
+            ? " Retry or skip the failed step now so the job continues to the suspension."
+            : " Ask a technician to retry or skip the failed step now."}
+        </div>
+      ) : null}
       <ErrorText message={error} />
       <ol className="steps">
         {job.steps.map((s) => (

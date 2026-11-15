@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { api, type Job, type Step } from "../api";
+import { ApiError, api, type Job, type Step } from "../api";
 import JobDetail from "./JobDetail";
 
 vi.mock("../api", async (orig) => {
@@ -32,6 +32,7 @@ const job = (status: string, steps: Step[], extra: Partial<Job> = {}): Job => ({
   created_by: "x@y.com",
   created_at: "2030-01-01T00:00:00Z",
   finished_at: null,
+  account_suspended: null,
   steps,
   scheduled_actions: [],
   ...extra,
@@ -135,4 +136,74 @@ test("scheduled actions can be cancelled only while scheduled", async () => {
   render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
   await flush();
   expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(1);
+});
+
+test("polling survives a failed request and shows the error until the next success", async () => {
+  vi.mocked(api.job)
+    .mockResolvedValueOnce(job("running", [step({ status: "running" })]))
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockRejectedValueOnce(new ApiError(502, "bad gateway"))
+    .mockResolvedValueOnce(job("running", [step({ status: "running" })]))
+    .mockResolvedValue(job("succeeded", [step({ status: "succeeded" })]));
+  render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  await flush(2000);
+  expect(api.job).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("alert").textContent).toContain("Failed to fetch");
+  expect(screen.getByText("Sign out")).toBeTruthy(); // the last known job stays shown
+  await flush(2000);
+  expect(api.job).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("alert").textContent).toContain("bad gateway");
+  await flush(2000);
+  expect(api.job).toHaveBeenCalledTimes(4);
+  expect(screen.queryByRole("alert")).toBeNull();
+  await flush(2000);
+  expect(api.job).toHaveBeenCalledTimes(5);
+  await flush(10000);
+  expect(api.job).toHaveBeenCalledTimes(5); // terminal: stopped
+});
+
+test("polling stops when the job is not found", async () => {
+  vi.mocked(api.job).mockRejectedValue(new ApiError(404, "job not found"));
+  render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  await flush(10000);
+  expect(api.job).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("alert").textContent).toContain("job not found");
+});
+
+test("polling stops on unmount", async () => {
+  vi.mocked(api.job).mockResolvedValue(job("running", [step({ status: "running" })]));
+  const { unmount } = render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  unmount();
+  await flush(10000);
+  expect(api.job).toHaveBeenCalledTimes(1);
+});
+
+test("a failed job that has not suspended the account says so", async () => {
+  vi.mocked(api.job).mockResolvedValue(
+    job("failed", [step({ status: "failed" })], { account_suspended: false }),
+  );
+  render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  const warning = screen.getByRole("status");
+  expect(warning.textContent).toMatch(/NOT suspended/);
+  expect(warning.textContent).toMatch(/retry or skip/i);
+});
+
+test("no suspension warning once the account is suspended, or while running", async () => {
+  vi.mocked(api.job).mockResolvedValueOnce(
+    job("failed", [step({ status: "failed" })], { account_suspended: true }),
+  );
+  const first = render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  expect(screen.queryByText(/NOT suspended/)).toBeNull();
+  first.unmount();
+  vi.mocked(api.job).mockResolvedValue(
+    job("succeeded", [step({ status: "succeeded" })], { account_suspended: false }),
+  );
+  render(<JobDetail tenantId="t1" jobId="j1" canOperate />);
+  await flush();
+  expect(screen.queryByText(/NOT suspended/)).toBeNull();
 });

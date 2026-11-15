@@ -95,8 +95,28 @@ export interface JobSummary {
 }
 
 export interface Job extends JobSummary {
+  // Offboarding jobs: whether the suspend step has succeeded (null: no such step).
+  account_suspended: boolean | null;
   steps: Step[];
   scheduled_actions: ScheduledAction[];
+}
+
+export interface PanelUser {
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_owner: boolean;
+  disabled: boolean;
+}
+
+export type MemberRole = "admin" | "technician" | "auditor";
+
+export interface Member {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  role: MemberRole;
+  disabled: boolean;
 }
 
 export interface AuditEvent {
@@ -180,6 +200,19 @@ export const api = {
     );
   },
   healthCheck: (id: string) => request<{ job_id: string }>("POST", `${t(id)}/health-check`),
+  updateTenant: (id: string, b: { admin_email?: string | null; domains?: string[] }) =>
+    request<Tenant>("PATCH", t(id), b),
+  members: (id: string) => request<Member[]>("GET", `${t(id)}/members`),
+  setMember: (id: string, email: string, role: MemberRole) =>
+    request<{ email: string; role: MemberRole }>("POST", `${t(id)}/members`, { email, role }),
+  removeMember: (id: string, userId: string) =>
+    request<void>("DELETE", `${t(id)}/members/${encodeURIComponent(userId)}`),
+
+  users: () => request<PanelUser[]>("GET", "/api/users"),
+  createUser: (b: { email: string; display_name: string | null }) =>
+    request<PanelUser>("POST", "/api/users", b),
+  disableUser: (userId: string) =>
+    request<PanelUser>("POST", `/api/users/${encodeURIComponent(userId)}/disable`),
 
   previewOffboarding: (id: string, p: OffboardParams) =>
     request<Preview>("POST", `${t(id)}/workflows/offboarding/preview`, p),

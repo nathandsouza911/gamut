@@ -43,7 +43,7 @@ export default function Jobs({ tenantId }: { tenantId: string }) {
             {jobs.map((j) => (
               <tr key={j.id}>
                 <td>
-                  <a href={`#/jobs/${j.id}`}>{j.workflow}</a>
+                  <a href={`#/t/${tenantId}/jobs/${j.id}`}>{j.workflow}</a>
                 </td>
                 <td>{j.target ?? ""}</td>
                 <td>
