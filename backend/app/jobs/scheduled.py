@@ -11,6 +11,12 @@ handler returns done, refused (its guard said no) or failed; the result is store
 audited. Handlers are looked up by name in a registry (register_action); workflow
 modules register theirs when they are imported.
 
+A `failed` result caused by Google's rate limit or quota (app.jobs.execute
+.is_rate_limited: GAM exit 9 with a quota reason) is not final: the action goes back
+to `scheduled` with the waiting-step backoff (30 s doubling, at most 900 s), at most
+MAX_QUOTA_RETRIES times (counted in params["quota_retries"]; audited as
+`scheduled_action.rescheduled`), then it fails.
+
 No database transaction is open while a handler runs.
 """
 
@@ -31,8 +37,11 @@ from app.audit.chain import append_event
 from app.crypto.envelope import materialize
 from app.gam.commands import redact_argv
 from app.jobs.execute import (
+    MAX_QUOTA_RETRIES,
     PrepareError,
+    backoff_seconds,
     error_outcome,
+    is_rate_limited,
     job_actor,
     open_tenant_files,
     scrub,
@@ -47,6 +56,8 @@ log = logging.getLogger(__name__)
 
 ACTION_LEASE_S = 900
 RESULT_MAX = 4_000
+# ScheduledAction.params key counting reschedules after Google quota errors.
+QUOTA_RETRIES_KEY = "quota_retries"
 _FINAL = (ScheduledStatus.done, ScheduledStatus.refused, ScheduledStatus.failed)
 
 
@@ -224,15 +235,43 @@ def _finish(
                     row.id)
         return
     status = result.status if result.status in _FINAL else ScheduledStatus.failed
+    message = result.result
+    details: dict[str, Any] = {
+        "action_id": str(row.id), "action": row.action, "job_id": str(row.job_id),
+        "argv": redact_argv(result.argv), "exit_code": result.exit_code,
+    }
+    if status == ScheduledStatus.failed and is_rate_limited(result.exit_code, message):
+        retries = int(row.params.get(QUOTA_RETRIES_KEY, 0)) if isinstance(row.params, dict) else 0
+        if retries < MAX_QUOTA_RETRIES:
+            # Google's rate limit or quota: run again later, with backoff (bounded).
+            delay = backoff_seconds(retries)
+            row.status = ScheduledStatus.scheduled
+            row.run_at = _now() + timedelta(seconds=delay)
+            row.params = {**(row.params or {}), QUOTA_RETRIES_KEY: retries + 1}
+            row.lease_until = None
+            row.claim_token = None
+            row.result = scrub(
+                f"{message}\nGoogle rate limit or quota reached; the action runs again in "
+                f"{delay} seconds (wait {retries + 1} of {MAX_QUOTA_RETRIES}).",
+                secrets)[:RESULT_MAX]
+            session.flush()
+            append_event(
+                session, actor=actor, tenant_id=tenant.id,
+                action="scheduled_action.rescheduled", target=_target(row, tenant),
+                details={**details, "run_at": row.run_at.isoformat(),
+                         "quota_retries": retries + 1},
+            )
+            session.commit()
+            return
+        message = (f"{message}\nGoogle's rate limit or quota was still reached after "
+                   f"{retries} waits; the action failed.")
     row.status = status
-    row.result = scrub(result.result, secrets)[:RESULT_MAX]
+    row.result = scrub(message, secrets)[:RESULT_MAX]
     row.lease_until = None
     session.flush()
     append_event(
         session, actor=actor, tenant_id=tenant.id, action=f"scheduled_action.{status.value}",
-        target=_target(row, tenant),
-        details={"action_id": str(row.id), "action": row.action, "job_id": str(row.job_id),
-                 "argv": redact_argv(result.argv), "exit_code": result.exit_code},
+        target=_target(row, tenant), details=details,
     )
     session.commit()
 

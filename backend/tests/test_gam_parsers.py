@@ -74,3 +74,15 @@ def test_parse_user_groups_csv():
     assert parse_user_groups_csv("User,Group,Role,Status,Delivery\n") == []
     with pytest.raises(ValueError):
         parse_user_groups_csv("ERROR: 404: notFound\n")
+
+
+def test_parse_user_info_json():
+    from app.gam.parsers import parse_user_info_json
+
+    info = parse_user_info_json('{"id": "42", "primaryEmail": "A@x.com", "suspended": true}\n')
+    assert info.id == "42" and info.primary_email == "a@x.com" and info.suspended is True
+    noisy = 'Getting user\n{"primaryEmail": "b@x.com", "suspended": false}\n'
+    info = parse_user_info_json(noisy)
+    assert info.id is None and info.suspended is False
+    with pytest.raises(ValueError):
+        parse_user_info_json("User: a@x.com\n")

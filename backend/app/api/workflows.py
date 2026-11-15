@@ -4,7 +4,9 @@
 POST /api/tenants/{tenant_id}/workflows/offboarding/preview   (technician or admin)
     Body: OffboardParams. Validates the parameters against the tenant and returns the
     ordered steps with their (redacted) GAM commands and a preview token. No side
-    effects: no job, no GAM call, no audit event.
+    effects: no job, no GAM call, no audit event. 409 while the user has an unfinished
+    offboarding or a pending deletion in this tenant (app.workflows.offboarding
+    .active_offboarding); 422 for the tenant's own admin account.
 
 The preview token is what POST /api/tenants/{tenant_id}/jobs needs to create the job:
 `v1.<expiry unix seconds>.<hex HMAC-SHA256>` keyed with GAMUT_SECRET_KEY over the
@@ -33,7 +35,13 @@ from app.gam.commands import redact_argv
 from app.models import Membership, Role, Tenant, TenantStatus, User
 from app.settings import Settings
 from app.workflows.base import StepKind, StepSpec
-from app.workflows.offboarding import OFFBOARDING_WORKFLOW, FieldError, Offboarding, OffboardParams
+from app.workflows.offboarding import (
+    OFFBOARDING_WORKFLOW,
+    FieldError,
+    Offboarding,
+    OffboardParams,
+    active_offboarding,
+)
 
 router = APIRouter(prefix="/api/tenants", tags=["workflows"], route_class=TenantScopedRoute)
 
@@ -143,6 +151,9 @@ def preview_offboarding(
             steps = Offboarding().plan(body, tenant)
         except FieldError as exc:
             raise field_error(exc) from None
+        conflict = active_offboarding(db, tenant.id, body.user)
+        if conflict is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, conflict)
     token, expires_at = issue_preview_token(
         request.app.state.settings, OFFBOARDING_WORKFLOW, body, tenant_id, user.id)
     return PreviewOut(preview_token=token, expires_at=expires_at, steps=preview_steps(steps))

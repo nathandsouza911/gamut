@@ -6,11 +6,12 @@ docs/decisions.md. User input fills fixed positions only and never becomes part 
 that is split later.
 """
 
-from app.gam.validate import Email, FreeText
+from app.gam.validate import Email, FreeText, GoogleUserId
 
 __all__ = [
-    "Email", "FreeText", "check_service_account", "create_drive_transfer", "delete_user",
-    "deprovision", "info_domain", "info_user", "list_transfers", "print_user_groups",
+    "Email", "FreeText", "GoogleUserId", "check_service_account", "create_drive_transfer",
+    "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
+    "info_user_by_id", "list_transfers", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
     "suspend_user", "vacation_on",
 ]
@@ -84,6 +85,26 @@ def info_user(e: Email) -> list[str]:
 
 def delete_user(e: Email) -> list[str]:
     return ["delete", "user", _email(e)]
+
+
+def _uid(value: GoogleUserId) -> str:
+    if not isinstance(value, GoogleUserId):
+        raise TypeError("expected a validated GoogleUserId")
+    return f"uid:{value}"
+
+
+def info_user_by_id(uid: GoogleUserId) -> list[str]:
+    """`info user uid:<id>`: the account with this immutable id, whatever its address.
+
+    gam7 7.52.3: `<UserItem>` accepts `uid:<id>` (normalizeEmailAddressOrUID strips the
+    prefix and passes the id as the Directory API userKey).
+    """
+    return ["info", "user", _uid(uid), "quick", "formatjson"]
+
+
+def delete_user_by_id(uid: GoogleUserId) -> list[str]:
+    """`delete user uid:<id>`: deletes exactly that account, never whoever has the address."""
+    return ["delete", "user", _uid(uid)]
 
 
 def info_domain() -> list[str]:

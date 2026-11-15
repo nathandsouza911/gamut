@@ -48,7 +48,7 @@ from app.models import (
     User,
 )
 from app.workflows.base import SEALED_PARAMS_KEY
-from app.workflows.offboarding import FieldError, OffboardParams, stored_params
+from app.workflows.offboarding import FieldError, OffboardParams, active_offboarding, stored_params
 
 router = APIRouter(prefix="/api/tenants", tags=["jobs"], route_class=TenantScopedRoute)
 READERS = (Role.admin, Role.technician, Role.auditor)
@@ -106,6 +106,9 @@ class JobOut(JobSummary):
     tenant_id: uuid.UUID
     params: dict[str, Any]
     gam_version: str | None
+    # Jobs with a `suspend` step (offboarding): whether it has succeeded. False on a
+    # failed job means the account is still active (ruling R14). None: no such step.
+    account_suspended: bool | None
     steps: list[StepOut]
     scheduled_actions: list[ScheduledActionOut]
 
@@ -144,10 +147,13 @@ def job_out(db: Session, job: Job) -> JobOut:
         .execution_options(populate_existing=True)
     )
     params = {k: v for k, v in (job.params or {}).items() if k != SEALED_PARAMS_KEY}
+    step_list = list(steps)
+    suspend = next((s for s in step_list if s.key == "suspend"), None)
     return JobOut(
         **_summary(job, creator.email if creator else None).model_dump(),
         tenant_id=job.tenant_id, params=params, gam_version=job.gam_version,
-        steps=[StepOut.model_validate(s, from_attributes=True) for s in steps],
+        account_suspended=None if suspend is None else suspend.status == StepStatus.succeeded,
+        steps=[StepOut.model_validate(s, from_attributes=True) for s in step_list],
         scheduled_actions=[_action_out(a) for a in actions],
     )
 
@@ -194,7 +200,12 @@ def create_workflow_job(
         if expired:
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
                                 "the preview has expired; preview the job again")
-        tenant = usable_tenant(db, tenant_id)
+        # The tenant row lock serializes confirms, so two different preview tokens for
+        # the same user cannot both create a job.
+        tenant = usable_tenant(db, tenant_id, lock=True)
+        conflict = active_offboarding(db, tenant.id, body.params.user)
+        if conflict is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, conflict)
         params = stored_params(body.params, request.app.state.credential_public_key, tenant.id)
         try:
             planned = plan_job(body.workflow, params, tenant)

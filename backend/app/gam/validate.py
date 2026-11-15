@@ -36,6 +36,26 @@ class Email(str):
         return super().__new__(cls, cleaned)
 
 
+_GOOGLE_ID_RE = re.compile(r"[0-9A-Za-z]{1,64}")
+
+
+class GoogleUserId(str):
+    """A Google Workspace user's immutable id (the `id` of `info user ... formatjson`).
+
+    Google's ids are long digit strings; letters are allowed defensively. Nothing else
+    (no spaces, `@`, `:` or newlines), so it can only fill the id in `uid:<id>`.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, value: str) -> Self:
+        if not isinstance(value, str):
+            raise TypeError("user id must be a string")
+        if not _GOOGLE_ID_RE.fullmatch(value):
+            raise ValueError("not a valid Google user id")
+        return super().__new__(cls, value)
+
+
 class FreeText(str):
     """Text passed to GAM as exactly one argument (for example an auto-reply message)."""
 

@@ -26,23 +26,31 @@ from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.audit.chain import append_event
+from app.audit.chain import append_event, redact
 from app.db import advisory_xact_lock, get_engine, session_scope
 from app.gam.commands import redact_argv
 from app.jobs.execute import backoff_seconds, job_actor, job_target, run_steps
 from app.models import Job, JobStatus, JobStep, StepStatus, Tenant, User
-from app.workflows.base import StepSpec, get_workflow
+from app.workflows.base import SEALED_PARAMS_KEY, StepSpec, get_workflow
 
 __all__ = [
-    "CLAIM_LOCK_KEY", "HEARTBEAT_S", "LEASE_S", "ConflictError", "PlannedJob",
-    "backoff_seconds", "claim_next", "create_job", "plan_job", "retry_step", "run_job",
-    "skip_step",
+    "CLAIM_LOCK_KEY", "HEARTBEAT_S", "LEASE_S", "MAX_RECLAIMS", "ConflictError",
+    "PlannedJob", "audit_params", "backoff_seconds", "claim_next", "create_job",
+    "plan_job", "retry_step", "run_job", "skip_step",
 ]
 
 log = logging.getLogger(__name__)
 
 LEASE_S = 120
 HEARTBEAT_S = 30
+# A job reclaimed this many times after its worker's lease expired is failed on the
+# next expiry instead of being run again (a step that crashes the worker every time).
+MAX_RECLAIMS = 5
+RECLAIM_LIMIT_MESSAGE = (
+    "The worker running this job stopped responding {n} times in a row (its lease "
+    "expired each time), so the job was stopped instead of being run again. Check the "
+    "worker's logs, then retry the step."
+)
 # Serializes claims so that "one running job per tenant" holds between workers.
 CLAIM_LOCK_KEY = 0x6A4D5143
 
@@ -147,9 +155,29 @@ def create_job(
         tenant_id=tenant_id,
         action="job.created",
         target=job_target(job, tenant) if tenant is not None else str(job.id),
-        details={"workflow": wf.name, "job_id": str(job.id), "steps": [s.key for s in steps]},
+        details={"workflow": wf.name, "job_id": str(job.id), "steps": [s.key for s in steps],
+                 "params": audit_params(job.params)},
     )
     return job
+
+
+def audit_params(params: dict[str, Any]) -> dict[str, Any]:
+    """The stored job parameters as audited: without the sealed part, through redact().
+
+    Stored parameters already carry "[redacted]" in place of free text (for example the
+    auto-reply); redact() also blanks any secret-like key, and any list of strings is
+    passed through redact_argv in case it is an argument list (password values).
+    """
+    def argv_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: argv_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            if value and all(isinstance(v, str) for v in value):
+                return redact_argv(value)
+            return [argv_safe(v) for v in value]
+        return value
+
+    return redact(argv_safe({k: v for k, v in params.items() if k != SEALED_PARAMS_KEY}))
 
 
 # --- Claiming and running ------------------------------------------------------------
@@ -163,7 +191,60 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
     job with a live lease. The claimed job becomes `running` with lease_until = now +
     lease_s and a fresh claim_token (run_job fences its writes with it), and a
     `job.claimed` event records the worker and the previous status.
+
+    A claim after an expired lease counts as a reclaim (jobs.reclaim_count). A job
+    whose lease expires again after MAX_RECLAIMS reclaims is failed instead (its
+    unfinished steps fail with a message, audited as job.step.failed and job.failed),
+    and the next runnable job is claimed. retry_step and skip_step reset the count.
     """
+    while True:
+        job, again = _claim_once(session, worker_id, lease_s)
+        if not again:
+            return job
+
+
+def _fail_crash_looping_job(session: Session, job: Job) -> None:
+    """Fail a job whose worker kept dying (no GAM runs). The caller commits."""
+    message = RECLAIM_LIMIT_MESSAGE.format(n=job.reclaim_count + 1)
+    now = _now()
+    tenant = session.get(Tenant, job.tenant_id)
+    target = job_target(job, tenant) if tenant is not None else str(job.id)
+    actor = job_actor(session, job)
+    unfinished = session.scalars(
+        select(JobStep)
+        .where(JobStep.job_id == job.id,
+               JobStep.status.in_((StepStatus.running, StepStatus.waiting)))
+        .order_by(JobStep.position)
+    )
+    for step in unfinished:
+        step.status = StepStatus.failed
+        step.output = message
+        step.next_poll_at = None
+        step.finished_at = now
+        session.flush()
+        append_event(
+            session, actor=actor, tenant_id=job.tenant_id, action="job.step.failed",
+            target=target,
+            details={"job_id": str(job.id), "workflow": job.workflow, "step": step.key,
+                     "position": step.position, "argv": list(step.args), "exit_code": None,
+                     "gam_version": job.gam_version},
+        )
+    job.status = JobStatus.failed
+    job.finished_at = now
+    job.lease_until = None
+    job.claim_token = None
+    session.flush()
+    get_workflow(job.workflow).on_finished(session, job)
+    append_event(
+        session, actor=actor, tenant_id=job.tenant_id, action="job.failed", target=target,
+        details={"job_id": str(job.id), "workflow": job.workflow,
+                 "gam_version": job.gam_version, "reason": message},
+    )
+    log.warning("job %s failed after %d lease expiries", job.id, job.reclaim_count + 1)
+
+
+def _claim_once(session: Session, worker_id: str, lease_s: int) -> tuple[Job | None, bool]:
+    """(claimed job or None, whether to look again: a crash-looping job was failed)."""
     advisory_xact_lock(session, CLAIM_LOCK_KEY)
     now = _now()
     other = aliased(Job)
@@ -195,8 +276,14 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
     job = session.scalar(stmt)
     if job is None:
         session.commit()
-        return None
+        return None, False
     previous = job.status
+    if previous == JobStatus.running:  # its worker's lease expired
+        if job.reclaim_count >= MAX_RECLAIMS:
+            _fail_crash_looping_job(session, job)
+            session.commit()
+            return None, True
+        job.reclaim_count += 1
     job.status = JobStatus.running
     job.lease_until = now + timedelta(seconds=lease_s)
     job.claim_token = uuid.uuid4()
@@ -218,7 +305,7 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
     )
     session.commit()
     log.info("worker %s claimed job %s (was %s)", worker_id, job.id, previous.value)
-    return job
+    return job, False
 
 
 class _Heartbeat:
@@ -328,6 +415,7 @@ def _requeue(
     job.status = JobStatus.queued
     job.finished_at = None
     job.lease_until = None
+    job.reclaim_count = 0
     session.flush()
     append_event(
         session,

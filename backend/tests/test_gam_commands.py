@@ -52,3 +52,17 @@ def test_redact_argv():
     assert redact_argv(["user", "a@x.com", "vacation", "on", "Subject", "s", "MESSAGE", "m"])[
         5::2] == ["[redacted]", "[redacted]"]
     assert redact_argv(["user", "a@x.com", "message"]) == ["user", "a@x.com", "message"]
+
+
+def test_user_by_google_id_builders():
+    from app.gam.validate import GoogleUserId
+
+    uid = GoogleUserId("104857600000000000001")
+    assert c.info_user_by_id(uid) == [
+        "info", "user", "uid:104857600000000000001", "quick", "formatjson"]
+    assert c.delete_user_by_id(uid) == ["delete", "user", "uid:104857600000000000001"]
+    with pytest.raises(TypeError):
+        c.delete_user_by_id("104857600000000000001")  # type: ignore[arg-type]
+    for bad in ("", "12 3", "a@b.com", "uid:1", "1" * 65, "12\n"):
+        with pytest.raises(ValueError):
+            GoogleUserId(bad)

@@ -58,6 +58,10 @@ select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+# These modules import fixtures (off, echo_action) from other test modules; pytest
+# finds them by name, so their parameters shadow the imports on purpose.
+"tests/test_offboarding_safety.py" = ["F811"]
+"tests/test_hardening.py" = ["F811"]
 
 [tool.mypy]
 python_version = "3.12"

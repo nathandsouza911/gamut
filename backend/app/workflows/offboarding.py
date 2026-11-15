@@ -11,15 +11,18 @@ Steps, in this order (ruling R10, docs/decisions.md):
   auto_reply       optional  `user <u> vacation on subject <s> message <m>` (Gmail
                              settings on a suspended account are unconfirmed)
   suspend          always    `info user <u> quick formatjson` first; no change when the
-                             account is already suspended
+                             account is already suspended; records the account's
+                             Google id (step.data["google_user_id"])
   record_groups    optional  `user <u> print groups` (CSV) into step.data["groups"],
                              committed as its own step; re-runs add to the record
   remove_groups    optional  `user <u> delete groups`, only after record_groups
                              succeeded; shows the recorded list (both are planned when
                              remove_groups is chosen)
   drive_transfer   optional  async; see _drive_transfer
-  schedule_delete  optional  a `delete_user` scheduled action N days later; its handler
-                             refuses unless the Drive transfer succeeded or was not chosen
+  schedule_delete  optional  a `delete_user` scheduled action N days later. Its handler
+                             deletes `uid:<google id>` and refuses unless the Drive
+                             transfer succeeded (or was not chosen) and that id still
+                             has the offboarded address and is suspended
 
 Every step is safe to run twice. execute() never commits: run_steps commits each
 outcome, fenced by the job's claim token.
@@ -29,7 +32,7 @@ parameters carry "[redacted]" in its place and the real text sealed for the work
 (job.params["sealed"], see stored_params); execute() reads it from ctx.sealed.
 """
 
-import json
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -45,10 +48,13 @@ from app.gam.commands import (
     REDACTED,
     Email,
     FreeText,
+    GoogleUserId,
     create_drive_transfer,
     delete_user,
+    delete_user_by_id,
     deprovision,
     info_user,
+    info_user_by_id,
     list_transfers,
     print_user_groups,
     remove_from_all_groups,
@@ -57,7 +63,12 @@ from app.gam.commands import (
     suspend_user,
     vacation_on,
 )
-from app.gam.parsers import TransferStatus, parse_transfers_csv, parse_user_groups_csv
+from app.gam.parsers import (
+    TransferStatus,
+    parse_transfers_csv,
+    parse_user_groups_csv,
+    parse_user_info_json,
+)
 from app.gam.runner import GamResult, run_gam
 from app.gam.validate import assert_in_tenant
 from app.jobs.execute import job_actor
@@ -67,7 +78,15 @@ from app.jobs.scheduled import (
     create_scheduled_action,
     register_action,
 )
-from app.models import Job, JobStep, ScheduledAction, ScheduledStatus, StepStatus, Tenant
+from app.models import (
+    Job,
+    JobStatus,
+    JobStep,
+    ScheduledAction,
+    ScheduledStatus,
+    StepStatus,
+    Tenant,
+)
 from app.workflows.base import (
     SEALED_PARAMS_KEY,
     StepContext,
@@ -89,6 +108,8 @@ USER_NOT_FOUND_EXITS = frozenset({56, 73})
 TRANSFER_CLOCK_SKEW = timedelta(seconds=60)
 # Checks after creating a transfer before giving up on Google listing it.
 MAX_UNLISTED_POLLS = 10
+# Step data / scheduled-action params key for the account's immutable Google id.
+GOOGLE_ID_KEY = "google_user_id"
 RESET_DONE_MESSAGE = "The password was reset to a random value. It is not stored or shown."
 
 
@@ -179,6 +200,48 @@ def _in_tenant(field: str, email: Email, tenant: Tenant) -> None:
         ) from None
 
 
+# Jobs in these states are not finished: a new offboarding of the same user waits.
+# `failed` counts, because a failed job stops at a step the operator must retry or skip.
+UNFINISHED_JOB = (JobStatus.queued, JobStatus.running, JobStatus.waiting, JobStatus.failed,
+                  JobStatus.awaiting_approval)
+PENDING_ACTION = (ScheduledStatus.scheduled, ScheduledStatus.running)
+
+
+def active_offboarding(session: Session, tenant_id: uuid.UUID, user: str) -> str | None:
+    """Why `user` cannot be offboarded again now (a 409 message), or None.
+
+    Refused while the tenant has an unfinished offboarding job for that user (queued,
+    running, waiting, awaiting approval, or failed and not yet retried or skipped to the
+    end) or a scheduled or running deletion of that user.
+    """
+    job = session.execute(
+        select(Job.id, Job.status)
+        .where(Job.tenant_id == tenant_id, Job.workflow == OFFBOARDING_WORKFLOW,
+               Job.params["target"].astext == user, Job.status.in_(UNFINISHED_JOB))
+        .order_by(Job.created_at)
+        .limit(1)
+    ).first()
+    if job is not None:
+        if job.status == JobStatus.failed:
+            return (f"An offboarding of {user} has failed and is not finished (job {job.id}). "
+                    "Open that job and retry or skip its failed step instead of starting "
+                    "another.")
+        return (f"An offboarding of {user} is already in progress (job {job.id}, "
+                f"{job.status.value}). Open that job instead of starting another.")
+    action = session.execute(
+        select(ScheduledAction.id, ScheduledAction.job_id)
+        .where(ScheduledAction.tenant_id == tenant_id,
+               ScheduledAction.action == DELETE_ACTION,
+               ScheduledAction.params["user"].astext == user,
+               ScheduledAction.status.in_(PENDING_ACTION))
+        .limit(1)
+    ).first()
+    if action is not None:
+        return (f"A deletion of {user} is already scheduled (job {action.job_id}). Cancel "
+                "it in that job before offboarding the user again.")
+    return None
+
+
 # --- Helpers -------------------------------------------------------------------------
 
 def _now() -> datetime:
@@ -222,21 +285,6 @@ def _hide(text: str, values: Iterable[str]) -> str:
     return text
 
 
-def _is_suspended(stdout: str) -> bool:
-    """Read `suspended` from `info user ... formatjson` (one JSON object)."""
-    candidates = [stdout.strip()] + [
-        line.strip() for line in stdout.splitlines() if line.strip().startswith("{")
-    ]
-    for candidate in candidates:
-        try:
-            value = json.loads(candidate)
-        except ValueError:
-            continue
-        if isinstance(value, dict):
-            return value.get("suspended") is True
-    raise ValueError("GAM's info user output was not the expected JSON")
-
-
 def _merge_groups(previous: Any, current: list[dict[str, str]]) -> list[dict[str, str]]:
     """Groups recorded earlier (an earlier, partial run) first, then new ones."""
     merged: dict[str, dict[str, str]] = {}
@@ -258,6 +306,11 @@ class Offboarding:
     def plan(self, params: OffboardParams, tenant: Tenant) -> list[StepSpec]:
         user = Email(params.user)
         _in_tenant("user", user, tenant)
+        if tenant.admin_email and user == tenant.admin_email.strip().lower():
+            raise FieldError(
+                "user", f"{user} is this tenant's admin account, which GAMUT uses for its "
+                "health check; it cannot be offboarded here. Change the tenant's admin "
+                "email first.")
         manager: Email | None = None
         if params.transfer_drive_to is not None:
             manager = Email(params.transfer_drive_to)
@@ -366,12 +419,16 @@ class Offboarding:
 
     def _suspend(self, step: JobStep, ctx: StepContext, params: OffboardJobParams,
                  user: Email, args: list[str]) -> StepOutcome:
+        """Suspend, and record the account's Google id for the scheduled deletion."""
         check = info_user(user)
-        info = _run_or_stop(check, ctx, {})
-        if _is_suspended(info.stdout):
-            return StepOutcome(status=StepStatus.succeeded, exit_code=0, argv=check,
+        info = parse_user_info_json(_run_or_stop(check, ctx, {}).stdout)
+        data: dict[str, Any] = {}
+        if info.id is not None:
+            data[GOOGLE_ID_KEY] = info.id
+        if info.suspended:
+            return StepOutcome(status=StepStatus.succeeded, exit_code=0, argv=check, data=data,
                                output=f"{user} is already suspended; no change was made.")
-        return run_gam_step(args, ctx.cfg_dir)
+        return replace(run_gam_step(args, ctx.cfg_dir), data=data)
 
     def _record_groups(self, step: JobStep, ctx: StepContext, params: OffboardJobParams,
                        user: Email, args: list[str]) -> StepOutcome:
@@ -505,10 +562,19 @@ class Offboarding:
             .limit(1)
         )
         if row is None:
+            # The deletion targets the account suspended by this job, by its Google id.
+            suspend_data = ctx.session.scalar(
+                select(JobStep.data).where(JobStep.job_id == ctx.job.id,
+                                           JobStep.key == "suspend")
+            )
+            action_params: dict[str, Any] = {"target": str(user), "user": str(user)}
+            google_id = (suspend_data or {}).get(GOOGLE_ID_KEY)
+            if google_id:
+                action_params[GOOGLE_ID_KEY] = str(google_id)
             row = create_scheduled_action(
                 ctx.session, tenant_id=ctx.tenant.id, job_id=ctx.job.id, action=DELETE_ACTION,
                 run_at=_now() + timedelta(days=params.delete_after_days),
-                params={"target": str(user), "user": str(user)},
+                params=action_params,
                 actor=job_actor(ctx.session, ctx.job),
             )
             output = (f"Deletion of {user} is scheduled for {row.run_at:%Y-%m-%d %H:%M} UTC. "
@@ -522,42 +588,81 @@ class Offboarding:
 
 # --- Scheduled deletion --------------------------------------------------------------
 
-def run_scheduled_delete(ctx: ActionContext) -> ActionResult:
-    """Delete the offboarded account, unless its Drive transfer did not complete.
+def _refused(message: str, argv: list[str] | None = None,
+             exit_code: int | None = None) -> ActionResult:
+    return ActionResult(status=ScheduledStatus.refused, result=message, argv=argv or [],
+                        exit_code=exit_code)
 
-    Refused when the job has a drive_transfer step that is not `succeeded` (also when it
-    was skipped). An account that no longer exists counts as done.
+
+def run_scheduled_delete(ctx: ActionContext) -> ActionResult:
+    """Delete the offboarded account by its Google id, after checking that it is still
+    that account, still suspended, and that its Drive transfer completed.
+
+    Refused (nothing is deleted) when:
+    - the job has a drive_transfer step that is not `succeeded` (also when skipped);
+    - the job's suspend step did not succeed, or no Google id was recorded by it;
+    - `info user uid:<id>` shows another id or another primary address (the account was
+      renamed, so the address may now belong to someone else), or an account that is
+      no longer suspended (it was reactivated).
+    An account that no longer exists counts as done (already deleted).
     """
     user = Email(str(ctx.action.params.get("user", "")))
     assert_in_tenant(user, ctx.tenant.domains)
-    transfer_status = ctx.session.scalar(
-        select(JobStep.status).where(JobStep.job_id == ctx.job.id,
-                                     JobStep.key == "drive_transfer")
-    )
+    rows = {row.key: row.status for row in ctx.session.execute(
+        select(JobStep.key, JobStep.status).where(
+            JobStep.job_id == ctx.job.id, JobStep.key.in_(("suspend", "drive_transfer")))
+    )}
     ctx.session.commit()  # end the read; no transaction stays open while GAM runs
+    transfer_status = rows.get("drive_transfer")
     if transfer_status is not None and transfer_status != StepStatus.succeeded:
-        return ActionResult(
-            status=ScheduledStatus.refused,
-            result=(f"The Drive transfer step is {transfer_status.value}, not succeeded, so "
-                    f"{user} was not deleted. Complete the transfer and offboard again, or "
-                    "delete the account by hand."),
-        )
-    check = info_user(user)
+        return _refused(
+            f"The Drive transfer step is {transfer_status.value}, not succeeded, so {user} "
+            "was not deleted. Complete the transfer and offboard again, or delete the "
+            "account by hand.")
+    if rows.get("suspend") != StepStatus.succeeded:
+        return _refused(f"The job did not suspend {user}, so it was not deleted.")
+    raw_id = ctx.action.params.get(GOOGLE_ID_KEY)
+    try:
+        uid = GoogleUserId(str(raw_id)) if raw_id else None
+    except ValueError:
+        uid = None
+    if uid is None:
+        return _refused(
+            f"No Google account id was recorded for {user} when it was suspended, so it "
+            "was not deleted (GAMUT deletes only the exact account it suspended). Delete "
+            "the account by hand if it should go.")
+    check = info_user_by_id(uid)
     info = run_gam(check, ctx.cfg_dir)
     if info.exit_code in USER_NOT_FOUND_EXITS:
         return ActionResult(status=ScheduledStatus.done, argv=check, exit_code=info.exit_code,
-                            result=f"{user} does not exist (already deleted); nothing to do.")
+                            result=f"{user} (id {uid}) does not exist (already deleted); "
+                                   "nothing to do.")
     if info.exit_code != 0:
         return ActionResult(status=ScheduledStatus.failed, argv=check,
                             exit_code=info.exit_code, result=_output(info))
-    args = delete_user(user)
+    try:
+        current = parse_user_info_json(info.stdout)
+    except ValueError as exc:
+        return ActionResult(status=ScheduledStatus.failed, argv=check, exit_code=0,
+                            result=str(exc))
+    if current.id != uid or current.primary_email != user:
+        return _refused(
+            f"The account with id {uid} is no longer {user} (GAM reports id "
+            f"{current.id or 'unknown'}, address {current.primary_email or 'unknown'}), so "
+            "it was not deleted. Check the account in the Admin console.", check, 0)
+    if not current.suspended:
+        return _refused(
+            f"{user} is not suspended any more (it was reactivated after offboarding), so "
+            "it was not deleted.", check, 0)
+    args = delete_user_by_id(uid)
     result = run_gam(args, ctx.cfg_dir)
     if result.exit_code == 0:
         return ActionResult(status=ScheduledStatus.done, argv=args, exit_code=0,
-                            result=f"{user} was deleted.")
+                            result=f"{user} (id {uid}) was deleted.")
     if result.exit_code in USER_NOT_FOUND_EXITS:
         return ActionResult(status=ScheduledStatus.done, argv=args, exit_code=result.exit_code,
-                            result=f"{user} does not exist (already deleted); nothing to do.")
+                            result=f"{user} (id {uid}) does not exist (already deleted); "
+                                   "nothing to do.")
     return ActionResult(status=ScheduledStatus.failed, argv=args, exit_code=result.exit_code,
                         result=_output(result))
 

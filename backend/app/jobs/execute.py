@@ -151,6 +151,9 @@ def secret_values(files: dict[str, bytes]) -> list[str]:
 
 
 def scrub(text: str, secrets: list[str]) -> str:
+    """`text` with secret values replaced and NUL bytes removed (PostgreSQL text and
+    jsonb cannot store NUL)."""
+    text = text.replace("\x00", "")
     for secret in secrets:
         text = text.replace(secret, REDACTED)
     return text

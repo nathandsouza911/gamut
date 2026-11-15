@@ -28,7 +28,8 @@ class GamResult:
 
 
 def _cap(data: bytes | None, limit: int) -> tuple[str, bool]:
-    text = (data or b"").decode("utf-8", errors="replace")
+    # NUL bytes are dropped: PostgreSQL text and jsonb cannot store them.
+    text = (data or b"").decode("utf-8", errors="replace").replace("\x00", "")
     if len(text) > limit:
         return text[:limit], True
     return text, False

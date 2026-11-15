@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Parsers for GAM's structured (CSV) output."""
+"""Parsers for GAM's structured (CSV and JSON) output."""
 
 import csv
 import io
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -91,3 +92,36 @@ def parse_user_groups_csv(stdout: str) -> list[dict[str, str]]:
         for row in reader
         if (row.get("Group") or "").strip()
     ]
+
+
+@dataclass(frozen=True)
+class UserInfo:
+    """The fields GAMUT reads from `info user ... formatjson`."""
+
+    id: str | None  # Google's immutable user id
+    primary_email: str | None  # lowercased
+    suspended: bool
+
+
+def parse_user_info_json(stdout: str) -> UserInfo:
+    """Parse `info user <user> quick formatjson` (one JSON object on stdout).
+
+    The whole output is tried first, then each line that starts with "{" (in case GAM
+    printed a progress line before it). Raises ValueError when no JSON object is found.
+    """
+    candidates = [stdout.strip()] + [
+        line.strip() for line in stdout.splitlines() if line.strip().startswith("{")
+    ]
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            uid, email = value.get("id"), value.get("primaryEmail")
+            return UserInfo(
+                id=str(uid) if isinstance(uid, str | int) and str(uid) else None,
+                primary_email=email.strip().lower() if isinstance(email, str) else None,
+                suspended=value.get("suspended") is True,
+            )
+    raise ValueError("GAM's info user output was not the expected JSON")

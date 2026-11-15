@@ -136,9 +136,20 @@ def _transfer_row(tid: str, status: str, when: datetime, old: str, new: str) -> 
     return f"{tid},{_iso(when)},{old},{new},{status},Drive and Docs,55656082996,{status}\n"
 
 
+GOOGLE_ID = "104857600000000000042"
+
+
 def _not_suspended(user: str) -> dict[str, Any]:
     return {"match": ["info", "user", user],
-            "stdout": json.dumps({"primaryEmail": user, "suspended": False}) + "\n"}
+            "stdout": json.dumps({"id": GOOGLE_ID, "primaryEmail": user,
+                                  "suspended": False}) + "\n"}
+
+
+def _suspended_by_id(user: str) -> dict[str, Any]:
+    """`info user uid:<id>` (the scheduled deletion's check): still that user, suspended."""
+    return {"match": ["info", "user", f"uid:{GOOGLE_ID}"],
+            "stdout": json.dumps({"id": GOOGLE_ID, "primaryEmail": user,
+                                  "suspended": True}) + "\n"}
 
 
 def _argvs(fake_gam: Any) -> list[list[str]]:
@@ -584,29 +595,32 @@ def test_scheduled_delete_runs_and_is_idempotent(
     off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
 ) -> None:
     u = off.user
-    fake_gam.scenario([_not_suspended(u)])
+    uid = f"uid:{GOOGLE_ID}"
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
     created = off.create(off.only(delete_after_days=1, confirm_delete_email=u))
     worker.drain()
     _make_actions_due(app_session, created["id"])
     worker.drain()
     (action,) = off.actions(created["id"])
     assert action.status == ScheduledStatus.done, action.result
-    assert ["delete", "user", u] in _argvs(fake_gam)
+    # The account is deleted by its Google id, never by the address.
+    assert ["delete", "user", uid] in _argvs(fake_gam)
+    assert ["delete", "user", u] not in _argvs(fake_gam)
     assert _events(app_session, "scheduled_action.done")[0].details["argv"] == [
-        "delete", "user", u]
+        "delete", "user", uid]
 
     # The account is already gone (GAM exit 56, ENTITY_DOES_NOT_EXIST_RC): done, no delete.
     second = off.create(off.only(delete_after_days=2, confirm_delete_email=u))
     worker.drain()
     before = len(fake_gam.calls())
-    fake_gam.scenario([{"match": ["info", "user", u], "exit": 56,
-                        "stderr": f"User: {u}, Does not exist\n"}])
+    fake_gam.scenario([{"match": ["info", "user", uid], "exit": 56,
+                        "stderr": f"User: {GOOGLE_ID}, Does not exist\n"}])
     _make_actions_due(app_session, second["id"])
     worker.drain()
     (action,) = off.actions(second["id"])
     assert action.status == ScheduledStatus.done
     assert "already" in (action.result or "")
-    assert _argvs(fake_gam)[before:] == [["info", "user", u, "quick", "formatjson"]]
+    assert _argvs(fake_gam)[before:] == [["info", "user", uid, "quick", "formatjson"]]
 
 
 def test_delete_cancellable_until_run(
@@ -631,6 +645,7 @@ def test_delete_cancellable_until_run(
     assert off.client.post(off.url(f"/scheduled-actions/{action.id}/cancel")).status_code == 409
 
     # Once it has run, it can no longer be cancelled.
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
     ran = off.create(off.only(delete_after_days=1, confirm_delete_email=u))
     worker.drain()
     _make_actions_due(app_session, ran["id"])
