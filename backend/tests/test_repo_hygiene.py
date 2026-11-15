@@ -64,6 +64,57 @@ def test_subprocess_checker_flags_imports_outside_runner(tmp_path, check_subproc
     assert "runner.py" not in out
 
 
+BYPASS_SOURCES = [
+    "import os, subprocess\n",
+    "import subprocess as sp\n",
+    "import subprocess.foo\n",
+    "from subprocess import run\n",
+    "def f():\n    import subprocess\n",
+    "m = __import__('subprocess')\n",
+    "import importlib\nm = importlib.import_module('subprocess')\n",
+    "from importlib import import_module\nm = import_module('subprocess')\n",
+    "import os\nos.system('ls')\n",
+    "import os\nos.popen('ls')\n",
+    "import os\nos.execvp('ls', ['ls'])\n",
+    "import os\nos.spawnl(0, 'ls')\n",
+    "import os as o\no.system('ls')\n",
+    "from os import system\n",
+    "from os import popen as p\n",
+    "def broken(:\n",
+]
+
+HARMLESS_SOURCES = [
+    "import os\nprint(os.getcwd())\n",
+    "# import subprocess\nx = 'subprocess'\n",
+    "import os.path\nos.path.join('a')\n",
+    "from os import path, getcwd\n",
+    "class A:\n    def system(self): ...\nA().system()\n",
+]
+
+
+@pytest.mark.parametrize("source", BYPASS_SOURCES)
+def test_subprocess_checker_flags_every_bypass(tmp_path, check_subprocess, capsys, source):
+    app = tmp_path / "backend" / "app"
+    app.mkdir(parents=True)
+    (app / "bad.py").write_text(source)
+    assert check_subprocess.main([str(tmp_path)]) == 1
+    assert "bad.py" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("source", HARMLESS_SOURCES)
+def test_subprocess_checker_accepts_harmless_code(tmp_path, check_subprocess, source):
+    app = tmp_path / "backend" / "app"
+    app.mkdir(parents=True)
+    (app / "ok.py").write_text(source)
+    assert check_subprocess.main([str(tmp_path)]) == 0
+
+
+def test_subprocess_checker_allows_runner(tmp_path, check_subprocess):
+    runner = tmp_path / "backend" / "app" / "gam"
+    runner.mkdir(parents=True)
+    (runner / "runner.py").write_text("import subprocess\nimport os\nos.killpg(1, 9)\n")
+    assert check_subprocess.main([str(tmp_path)]) == 0
+
 def test_repo_confines_subprocess_to_runner(check_subprocess):
     assert check_subprocess.main([str(REPO_ROOT)]) == 0
 

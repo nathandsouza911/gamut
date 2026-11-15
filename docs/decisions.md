@@ -38,3 +38,32 @@ Login (10 per minute per client IP) and job creation (30 per minute per user) us
 
 ## 2026-11-15: OIDC sign-in is optional; the bootstrap owner always works
 OIDC is enabled when `GAMUT_OIDC_CLIENT_ID` and `GAMUT_OIDC_CLIENT_SECRET` are set (then `GAMUT_PUBLIC_BASE_URL` is required). Without it, `/api/auth/login` returns 503 and only the bootstrap owner can sign in. The bootstrap owner is created once from `GAMUT_BOOTSTRAP_ADMIN_EMAIL`/`GAMUT_BOOTSTRAP_ADMIN_PASSWORD` (argon2id); later starts never change it, and every use is audited as `auth.bootstrap_login`.
+
+## 2026-11-15: GAM command syntax verified (Task 4)
+Verified against the GAM wiki and, more strictly, against the pinned gam7 7.52.3 source installed in the dev image (`gam/__init__.py`; the usage comment above each command function, and the code). Wiki pages: Users-Gmail-Send-As-Signature-Vacation (https://github.com/GAM-team/GAM/wiki/Users-Gmail-Send-As-Signature-Vacation) and Google-Data-Transfers (https://github.com/GAM-team/GAM/wiki/Google-Data-Transfers) were read directly; for the other commands the other wiki pages were not fetched; the source usage comments and code (which the wiki mirrors) are the evidence. `gam version` was run for real: `GAM 7.52.03 - https://github.com/GAM-team/GAM - pythonsource` (note `7.52.03`).
+
+| Builder | Final argv (after `gam`) | Deviation from the spec form |
+|---|---|---|
+| suspend_user | `update user <e> suspended on` | none |
+| reset_password_random | `update user <e> password random` | none. GAM does not print the password unless `logpassword <file>` is given |
+| signout | `user <e> signout` | none (`signoutTurnoff2SVUsers`, no extra arguments allowed) |
+| deprovision | `user <e> deprovision` | none. Optional `popimap`, `signout`, `turnoff2sv` are not used. Finding: it deletes app-specific passwords and OAuth tokens, but if the user is already suspended it skips backup verification codes (message "is suspended, no backup codes"). Step 1 (suspend) runs before step 4, so backup codes are not invalidated in the spec order. Task 7 must decide (run deprovision before suspend, or accept). Not confirmable offline whether Google keeps backup codes valid for a suspended user |
+| vacation_on | `user <e> vacation on subject <subject> message <message>` | none. Wiki recommends also `start`/`end` dates because a previously expired vacation can keep the responder off; not added (spec form); check in Task 10. `\n` in the text becomes a newline (GAM unescapes). Whether Gmail settings calls work for a suspended account cannot be confirmed offline: it is an open question for Task 10; until then Task 7 should prefer running this step before suspend |
+| print_user_groups | `user <e> print groups` | CSV on stdout, columns `User,Group,Role,Status,Delivery` (no `nodetails`, so Role is kept for restore) |
+| remove_from_all_groups | `user <e> delete groups` | none. Lists the user's groups (direct memberships) and removes each |
+| create_drive_transfer | `create datatransfer <e> gdrive <manager>` | none. `gdrive` is an accepted service alias (also `drive`, `googledrive`). Privacy level is left at Google's default (`private`/`shared`/`all` not given). Output contains a `Transfer ID: <id>` line (printEntity) to parse; exact text to be confirmed in Task 10 |
+| get_transfer_status(transfer_id: str) | `info datatransfer <id>` | Text only (no JSON for `info`). Done when the line `Overall Transfer Status: completed` appears; `failed` is the failure value, `inProgress` is pending. Alternative with CSV: `print datatransfers olduser <e> newuser <m>` (column `overallTransferStatusCode`), not used |
+| info_user | `info user <e> quick formatjson` | `quick` skips group, license, schema, alias lookups; `formatjson` gives one JSON object on stdout |
+| delete_user | `delete user <e>` | none. Fails on a user with a Vault hold |
+| info_domain | `info domain formatjson` | No domain argument: runs `info instance` (customers.get plus domains.list), a read-only directory call; one JSON object |
+| check_service_account | `user <e> check serviceaccount` | Prints PASS/FAIL lines per scope; exit code 10 means scopes not authorized |
+
+Special value forms: for `vacation`, `subject` and `message` (also `textmessage`, `htmlmessage`) take the NEXT argument literally; only when the keyword itself is one of `file`, `textfile`, `htmlfile` (local file), `gdoc`, `ghtml` (Google Doc), `gcsdoc`, `gcshtml` (Cloud Storage), or `sig`, `signature`, `textsig`, `htmlsig` for signatures, does GAM read from elsewhere. Because the text is a separate argument, text such as `file /etc/passwd` would be taken literally, so file reading is not reachable through our builder. `FreeText` still rejects text whose first word is one of those keywords (plus `gsheet`, `gcsfile`, `url` as a precaution), by name. Real prose starting with the word "file" or "url" is also rejected (accepted false positive).
+Output formats: `formatjson` is supported by `info user`, `info domain`/`info instance`; `print groups` and `print datatransfers` are CSV; `info datatransfer`, `check serviceaccount`, `deprovision`, `signout` print text only.
+Not confirmed: behavior against a real domain (Task 10); wiki pages other than the two named above.
+
+## 2026-11-15: Runner design (Task 4)
+`run_gam` runs the binary from `GAMUT_GAM_BIN` with an argument list, `shell=False`, no inherited environment: exactly `PATH=/usr/local/bin:/usr/bin:/bin` (fixed: the images keep python3 and gam there), `HOME` and `GAMCFGDIR` set to the config directory, `LANG=C.UTF-8`. It starts GAM in its own session; on timeout the whole process group gets SIGKILL and the result has `timed_out=True`, exit code 124. A missing binary gives exit code 127. Output is read fully and then capped per stream (memory is bounded only by the timeout). `redact_argv` removes `subject` and `message` values and any `password` value except `random`; callers store only redacted argv. Fake gam finds its scenario and log next to the script (the runner's environment cannot carry `FAKE_GAM_*`); the env variables remain as optional overrides.
+
+## 2026-11-15: Tenant domain matching
+`assert_in_tenant` needs an exact domain match; subdomains match only for an entry written `*.acme.com` (which does not cover `acme.com`). `Email` trims spaces only, so a trailing newline is rejected.

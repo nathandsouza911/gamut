@@ -5,7 +5,9 @@ TEST_DATABASE_URL     connects as the owner role (gamut_owner): migrations and c
 TEST_APP_DATABASE_URL connects as the app role (gamut_app): what the code under test uses.
 """
 
+import json
 import os
+import shutil
 import time
 import uuid
 import warnings
@@ -297,3 +299,52 @@ class FakeIdP:
 @pytest.fixture
 def fake_idp() -> FakeIdP:
     return FakeIdP()
+
+
+# --- Fake gam executable ------------------------------------------------------------
+
+class FakeGam:
+    """Handle on a fake `gam` installed in a temporary directory.
+
+    .path         the executable (GAMUT_GAM_BIN points at it)
+    .scenario(l)  replace the scenario: a list of {"match": [argv prefix], "exit": int,
+                  "stdout": str, "stderr": str, "sleep": float}; the first match wins
+    .calls()      every recorded invocation, oldest first, as
+                  {"argv": [...], "env": {"GAMCFGDIR": str, "files": [...], "keys": [...]}}
+                  (`version` calls are not recorded)
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.dir = directory
+        self.path = directory / "gam"
+
+    def scenario(self, rules: list[dict[str, Any]]) -> None:
+        (self.dir / "scenario.json").write_text(json.dumps(rules), encoding="utf-8")
+
+    def calls(self) -> list[dict[str, Any]]:
+        log = self.dir / "calls.jsonl"
+        if not log.exists():
+            return []
+        lines = log.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines if line]
+
+
+@pytest.fixture
+def fake_gam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGam]:
+    """Installs tests/fake_gam/gam and points GAMUT_GAM_BIN (settings) at it."""
+    from app.settings import get_settings
+
+    directory = tmp_path / "fake_gam"
+    directory.mkdir()
+    source = Path(__file__).resolve().parent / "fake_gam" / "gam"
+    shutil.copyfile(source, directory / "gam")
+    (directory / "gam").chmod(0o755)
+    monkeypatch.setenv("GAMUT_GAM_BIN", str(directory / "gam"))
+    monkeypatch.setenv("GAMUT_ROLE", "cli")
+    monkeypatch.setenv(
+        "GAMUT_DATABASE_URL",
+        os.environ.get("GAMUT_DATABASE_URL", "postgresql+psycopg://x:x@localhost/x"),
+    )
+    get_settings.cache_clear()
+    yield FakeGam(directory)
+    get_settings.cache_clear()
