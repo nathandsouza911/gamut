@@ -63,7 +63,7 @@ Output formats: `formatjson` is supported by `info user`, `info domain`/`info in
 Not confirmed: behavior against a real domain (Task 10); wiki pages other than the two named above.
 
 ## 2026-11-15: Runner design (Task 4)
-`run_gam` runs the binary from `GAMUT_GAM_BIN` with an argument list, `shell=False`, no inherited environment: exactly `PATH=/usr/local/bin:/usr/bin:/bin` (fixed: the images keep python3 and gam there), `HOME` and `GAMCFGDIR` set to the config directory, `LANG=C.UTF-8`. It starts GAM in its own session; on timeout the whole process group gets SIGKILL and the result has `timed_out=True`, exit code 124. A missing binary gives exit code 127. Output is read fully and then capped per stream (memory is bounded only by the timeout). `redact_argv` removes `subject` and `message` values and any `password` value except `random`; callers store only redacted argv. Fake gam finds its scenario and log next to the script (the runner's environment cannot carry `FAKE_GAM_*`); the env variables remain as optional overrides.
+`run_gam` runs the binary from `GAMUT_GAM_BIN` with an argument list, `shell=False`, no inherited environment: exactly `PATH=/usr/local/bin:/usr/bin:/bin` (fixed: the images keep python3 and gam there), `HOME` and `GAMCFGDIR` set to the config directory, `LANG=C.UTF-8`, and (since Task 5 fix 1) `TMPDIR` = the config directory, so GAM's temporary files (it uses Python's `TemporaryFile` for CSV handling) stay inside the per-job directory that is removed afterwards. It starts GAM in its own session; on timeout the whole process group gets SIGKILL and the result has `timed_out=True`, exit code 124. A missing binary gives exit code 127. Output is read fully and then capped per stream (memory is bounded only by the timeout). `redact_argv` removes `subject` and `message` values and any `password` value except `random`; callers store only redacted argv. Fake gam finds its scenario and log next to the script (the runner's environment cannot carry `FAKE_GAM_*`); the env variables remain as optional overrides.
 
 ## 2026-11-15: Tenant domain matching
 `assert_in_tenant` needs an exact domain match; subdomains match only for an entry written `*.acme.com` (which does not cover `acme.com`). `Email` trims spaces only, so a trailing newline is rejected.
@@ -91,3 +91,6 @@ A health check is a normal job (workflow `health_check`, created by `POST /api/t
 
 ## 2026-11-15: Tenant route parameter matching
 `check_tenant_routes` and the isolation test match `{tenant_id}` with or without a converter (`\{tenant_id(:[^}]*)?\}`), so a `{tenant_id:uuid}` route cannot bypass the route-class check.
+
+## 2026-11-15: The worker has no writable default temp directory
+The worker container's root filesystem is read-only. `gam_version()` runs `gam version` in a temporary directory under `GAMUT_JOB_DIR` (never Python's default tempdir) and caches the answer once per process and GAM binary. GAM itself gets `TMPDIR` = the job's config directory. Compose also gives the worker a small `/tmp` tmpfs (uid 10001, mode 0700, 64 MB) for any library that still uses the default tempdir.

@@ -435,3 +435,29 @@ def test_concurrent_member_insert_is_409_not_500(
     rival.close()
     worker.join(timeout=10)
     assert result["r"].status_code == 409, result["r"].text
+
+
+def test_run_steps_works_without_a_default_tempdir(
+    owner_client: TestClient,
+    stored: Tenant,
+    app_session: Session,
+    credential_keys: Keys,
+    fake_gam: Any,
+    job_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's root filesystem is read-only: nothing may use the default tempdir."""
+    import tempfile
+
+    from app.gam.runner import clear_gam_version_cache
+
+    monkeypatch.setattr(tempfile, "tempdir", "/nonexistent-tmp")
+    monkeypatch.delenv("TMPDIR", raising=False)
+    clear_gam_version_cache()
+    job = _health_job(owner_client, stored, app_session)
+    run_steps(app_session, job, credential_keys[0])
+    assert job.status == JobStatus.succeeded
+    assert job.gam_version == "GAM 7.x.y - fake"
+    for call in fake_gam.calls():
+        assert call["env"]["TMPDIR"] == call["env"]["GAMCFGDIR"]
+    assert os.listdir(job_dir) == []

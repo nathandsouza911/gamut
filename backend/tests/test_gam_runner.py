@@ -21,9 +21,11 @@ def test_runner_passes_args_verbatim_and_isolates_env(fake_gam, tmp_path, monkey
     assert call["env"]["GAMCFGDIR"] == str(cfg)
     assert call["env"]["files"] == ["oauth2service.json"]
     keys = set(call["env"]["keys"])
-    assert {"PATH", "HOME", "GAMCFGDIR", "LANG"} <= keys
     assert not any(k.startswith("GAMUT_") or k == "SOME_PARENT_VAR" for k in keys)
-    assert keys == {"PATH", "HOME", "GAMCFGDIR", "LANG"}
+    assert keys == {"PATH", "HOME", "GAMCFGDIR", "LANG", "TMPDIR"}
+    # GAM's temporary files (Python's TemporaryFile) go into the job directory, which
+    # is removed afterwards; the worker's root filesystem is read-only.
+    assert call["env"]["TMPDIR"] == str(cfg)
 
 
 def test_runner_reports_nonzero_exit_and_stderr(fake_gam, tmp_path):
@@ -57,9 +59,34 @@ def test_runner_missing_binary(fake_gam, tmp_path, monkeypatch):
     assert r.exit_code == 127 and r.timed_out is False
 
 
-def test_gam_version(fake_gam):
+def test_gam_version(fake_gam, job_dir):
     assert gam_version() == "GAM 7.x.y - fake"
     assert fake_gam.calls() == []
+    assert list(job_dir.iterdir()) == []  # its temporary directory is gone
+
+
+def test_gam_version_uses_job_dir_not_default_tempdir_and_is_cached(
+    fake_gam, job_dir, monkeypatch
+):
+    import tempfile
+
+    from app.gam import runner
+
+    # As in the worker container: no writable default temporary directory.
+    monkeypatch.setattr(tempfile, "tempdir", "/nonexistent-tmp")
+    seen = []
+    real = runner.run_gam
+
+    def counting(args, cfg_dir, **kwargs):
+        seen.append(cfg_dir)
+        return real(args, cfg_dir, **kwargs)
+
+    monkeypatch.setattr(runner, "run_gam", counting)
+    runner.clear_gam_version_cache()
+    assert gam_version() == "GAM 7.x.y - fake"
+    assert gam_version() == "GAM 7.x.y - fake"
+    assert len(seen) == 1  # once per process (per GAM binary)
+    assert seen[0].parent == job_dir
 
 
 def test_free_text_reaches_gam_as_one_argument(fake_gam, tmp_path):

@@ -7,7 +7,8 @@ found next to this script (calls.jsonl, scenario.json); FAKE_GAM_LOG and
 FAKE_GAM_SCENARIO override them when set. The `fake_gam` pytest fixture copies this
 script and those files into a temporary directory.
 
-Each log line is {"argv": [...], "env": {"GAMCFGDIR": ..., "files": [...], "keys": [...]}}.
+Each log line is {"argv": [...], "env": {"GAMCFGDIR": ..., "TMPDIR": ..., "files": [...],
+"keys": [...]}}.
 Scenario: a JSON list of {"match": [argv prefix], "exit": int, "stdout": str,
 "stderr": str, "sleep": float, "stdout_bytes": int}; the first match wins. The default
 reply is exit 0 with empty output. `version` is never logged and always answers
@@ -35,7 +36,12 @@ def main() -> int:
         files = []
     entry = {
         "argv": argv,
-        "env": {"GAMCFGDIR": cfg, "files": files, "keys": sorted(os.environ)},
+        "env": {
+            "GAMCFGDIR": cfg,
+            "TMPDIR": os.environ.get("TMPDIR"),
+            "files": files,
+            "keys": sorted(os.environ),
+        },
     }
     log = Path(os.environ.get("FAKE_GAM_LOG") or HERE / "calls.jsonl")
     with log.open("a", encoding="utf-8") as fh:

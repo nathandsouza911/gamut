@@ -48,7 +48,10 @@ services:
     user: "10001"
     read_only: true
     tmpfs:
+      # Per-job GAM configuration directories (decrypted credentials).
       - /run/gamut-jobs:mode=0700,uid=10001
+      # The root filesystem is read-only; Python and libraries may still want /tmp.
+      - /tmp:mode=0700,uid=10001,size=64m
     env_file: .env
     environment:
       GAMUT_CREDENTIAL_PRIVATE_KEY_FILE: /run/secrets/credential_private_key
