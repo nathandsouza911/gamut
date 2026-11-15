@@ -8,9 +8,18 @@ results and audit events, and calls the workflow's on_finished hook when the job
 execute() must rebuild the step's argument list from the job's parameters and tenant
 (for example by calling plan() again) rather than reading JobStep.args: stored args are
 redacted (app.gam.commands.redact_argv).
+
+execute() must not commit or open its own transaction: run_steps commits each outcome
+fenced by the job's claim token. Writes made through ctx.session (for example a
+scheduled action) are committed together with the step's result.
+
+Inputs the worker needs but the database must not hold in clear are stored sealed in
+job.params["sealed"] (app.crypto.envelope.seal_json with SEALED_PARAMS_AAD); run_steps
+opens them and passes the value as ctx.sealed.
 """
 
 import importlib
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -23,8 +32,15 @@ from app.models import Job, JobStep, StepStatus, Tenant
 
 StepKind = Literal["run", "async", "schedule"]
 
+SEALED_PARAMS_KEY = "sealed"
+
+
+def sealed_params_aad(tenant_id: uuid.UUID) -> bytes:
+    """Associated data for a job's sealed parameters: bound to the tenant."""
+    return b"gamut-job-params-v1:" + tenant_id.bytes
+
 # Modules that define built-in workflows; each calls register() on import.
-BUILTIN_WORKFLOW_MODULES = ("app.workflows.health",)
+BUILTIN_WORKFLOW_MODULES = ("app.workflows.health", "app.workflows.offboarding")
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,8 @@ class StepContext:
     job: Job
     step: JobStep
     cfg_dir: Path  # the job's GAMCFGDIR, holding the tenant's decrypted GAM files
+    # The job's sealed parameters (job.params["sealed"]), opened by the worker; {} if none.
+    sealed: dict[str, Any] = field(default_factory=dict)
 
 
 class Workflow(Protocol):

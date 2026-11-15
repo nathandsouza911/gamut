@@ -10,7 +10,9 @@ script and those files into a temporary directory.
 Each log line is {"argv": [...], "env": {"GAMCFGDIR": ..., "TMPDIR": ..., "files": [...],
 "keys": [...]}}.
 Scenario: a JSON list of {"match": [argv prefix], "exit": int, "stdout": str,
-"stderr": str, "sleep": float, "stdout_bytes": int}; the first match wins. The default
+"stderr": str, "sleep": float, "stdout_bytes": int}; the first match wins. A rule may
+instead carry "replies": [{"exit", "stdout", "stderr"}, ...]: the Nth call matching its
+prefix (counted in the log) gets the Nth reply, and the last reply repeats. The default
 reply is exit 0 with empty output. `version` is never logged and always answers
 "GAM 7.x.y - fake".
 """
@@ -54,6 +56,14 @@ def main() -> int:
             break
     else:
         rule = {}
+    if rule.get("replies"):
+        prefix = rule.get("match", [])
+        earlier = sum(
+            1 for line in log.read_text("utf-8").splitlines()
+            if line and json.loads(line)["argv"][: len(prefix)] == prefix
+        ) - 1  # the current call is already logged
+        replies = rule["replies"]
+        rule = {**rule, **replies[min(earlier, len(replies) - 1)]}
     if rule.get("sleep"):
         time.sleep(float(rule["sleep"]))
     out = rule.get("stdout", "")

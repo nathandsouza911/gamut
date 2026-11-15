@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.crypto.envelope import SealedBundle, open_bundle
@@ -382,8 +382,15 @@ def test_health_check_route_rules(
     login_as(client, tech)
     assert client.post(f"/api/tenants/{stored.id}/health-check").status_code == 403
     login_as(client, admin)
+    # The check queued by the upload is still queued: it is returned, not duplicated.
+    upload_check = app_session.scalar(select(Job).where(Job.tenant_id == stored.id))
+    assert upload_check is not None
     r = client.post(f"/api/tenants/{stored.id}/health-check")
-    assert r.status_code == 202
+    assert r.status_code == 202 and r.json()["job_id"] == str(upload_check.id)
+    upload_check.status = JobStatus.succeeded
+    app_session.commit()
+    r = client.post(f"/api/tenants/{stored.id}/health-check")
+    assert r.status_code == 202 and r.json()["job_id"] != str(upload_check.id)
     created = _events(app_session, "job.created")[-1]
     assert created.actor == admin.email and created.details["workflow"] == "health_check"
 
@@ -392,6 +399,8 @@ def test_health_check_route_rules(
     assert client.post(f"/api/tenants/{stored.id}/health-check").status_code == 409
     stored.status = TenantStatus.pending
     stored.admin_email = None
+    app_session.execute(update(Job).where(Job.tenant_id == stored.id)
+                        .values(status=JobStatus.succeeded))
     app_session.commit()
     r = client.post(f"/api/tenants/{stored.id}/health-check")
     assert r.status_code == 422 and "admin_email" in r.text

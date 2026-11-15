@@ -41,3 +41,36 @@ def test_list_transfers_through_runner(fake_gam, tmp_path):
     fake_gam.scenario([{"match": ["print", "datatransfers"], "stdout": CSV}])
     result = run_gam(argv, tmp_path)
     assert [t.id for t in parse_transfers_csv(result.stdout)] == ["111", "222"]
+
+
+def test_transfer_request_time_is_parsed_as_utc():
+    from datetime import UTC, datetime, timedelta, timezone
+
+    got = parse_transfers_csv(
+        HEADER
+        + "1,2026-11-15T10:00:00Z,a@x.com,m@x.com,pending,D,1,pending,\n"
+        + "2,2026-11-15T12:00:00+02:00,a@x.com,m@x.com,pending,D,1,pending,\n"
+        + "3,2026-11-15T10:00:00,a@x.com,m@x.com,pending,D,1,pending,\n"
+        + "4,never,a@x.com,m@x.com,pending,D,1,pending,\n"
+    )
+    ten = datetime(2026, 11, 15, 10, tzinfo=UTC)
+    assert [t.request_time for t in got] == [ten, ten, ten, None]
+    assert got[1].request_time == datetime(2026, 11, 15, 12, tzinfo=timezone(timedelta(hours=2)))
+
+
+def test_parse_user_groups_csv():
+    from app.gam.parsers import parse_user_groups_csv
+
+    csv_text = (
+        "User,Group,Role,Status,Delivery\n"
+        "a@x.com,Staff@x.com,MEMBER,ACTIVE,ALL_MAIL\n"
+        "a@x.com,owners@x.com,OWNER,ACTIVE,\n"
+    )
+    assert parse_user_groups_csv(csv_text) == [
+        {"group": "staff@x.com", "role": "MEMBER", "status": "ACTIVE", "delivery": "ALL_MAIL"},
+        {"group": "owners@x.com", "role": "OWNER", "status": "ACTIVE", "delivery": ""},
+    ]
+    assert parse_user_groups_csv("") == []
+    assert parse_user_groups_csv("User,Group,Role,Status,Delivery\n") == []
+    with pytest.raises(ValueError):
+        parse_user_groups_csv("ERROR: 404: notFound\n")

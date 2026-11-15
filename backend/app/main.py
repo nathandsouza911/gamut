@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import auth, tenants, users
+from app.api import auth, jobs, tenants, users, workflows
 from app.auth.bootstrap import ensure_bootstrap_owner
 from app.auth.oidc import OidcClient
 from app.auth.ratelimit import SlidingWindowLimiter
@@ -63,7 +63,8 @@ def create_app(
         same_site="lax",
         https_only=True,
     )
-    for router in (auth.router, users.router, tenants.router):
+    for router in (auth.router, users.router, tenants.router, workflows.router,
+                   jobs.router):
         app.include_router(router)
     check_tenant_routes(app)
     return app

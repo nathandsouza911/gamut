@@ -112,6 +112,48 @@ def open_bundle(
     return {name: base64.b64decode(value) for name, value in encoded.items()}
 
 
+# --- Sealed values in job parameters -------------------------------------------------
+# Job inputs the worker needs but the database must not hold in clear (the auto-reply
+# text) are sealed by the web process with the same public key and stored as a JSON
+# object of base64 strings. Only the worker can open them.
+_SEALED_NAME = "value.json"
+
+
+def seal_json(
+    value: object, public_key: X25519PublicKey, *, associated_data: bytes
+) -> dict[str, object]:
+    """Seal a JSON-serialisable value into a JSON-ready dict (see open_json)."""
+    sealed = seal_bundle(
+        {_SEALED_NAME: json.dumps(value, sort_keys=True).encode("utf-8")}, public_key,
+        associated_data=associated_data,
+    )
+    return {
+        "ciphertext": base64.b64encode(sealed.ciphertext).decode("ascii"),
+        "nonce": base64.b64encode(sealed.nonce).decode("ascii"),
+        "wrapped_key": base64.b64encode(sealed.wrapped_key).decode("ascii"),
+        "key_version": sealed.key_version,
+    }
+
+
+def open_json(blob: object, private_key: X25519PrivateKey, *, associated_data: bytes) -> object:
+    """Open a seal_json blob. Raises ValueError (malformed) or InvalidTag (wrong key/AAD)."""
+    if not isinstance(blob, dict):
+        raise ValueError("sealed value is not an object")
+    try:
+        sealed = SealedBundle(
+            ciphertext=base64.b64decode(blob["ciphertext"], validate=True),
+            nonce=base64.b64decode(blob["nonce"], validate=True),
+            wrapped_key=base64.b64decode(blob["wrapped_key"], validate=True),
+            key_version=int(blob["key_version"]),
+        )
+    except (KeyError, TypeError, binascii.Error) as exc:
+        raise ValueError("sealed value is malformed") from exc
+    files = open_bundle(sealed, private_key, associated_data=associated_data)
+    if _SEALED_NAME not in files:
+        raise ValueError("sealed value is malformed")
+    return json.loads(files[_SEALED_NAME])
+
+
 # --- Keys ----------------------------------------------------------------------------
 
 def encode_public_key(public_key: X25519PublicKey) -> str:

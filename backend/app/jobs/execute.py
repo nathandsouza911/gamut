@@ -40,7 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.chain import append_event
-from app.crypto.envelope import SealedBundle, materialize, open_bundle
+from app.crypto.envelope import SealedBundle, materialize, open_bundle, open_json
 from app.gam.commands import redact_argv
 from app.gam.runner import gam_version
 from app.models import (
@@ -54,7 +54,15 @@ from app.models import (
     User,
 )
 from app.settings import get_settings
-from app.workflows.base import StepContext, StepOutcome, Workflow, combined_output, get_workflow
+from app.workflows.base import (
+    SEALED_PARAMS_KEY,
+    StepContext,
+    StepOutcome,
+    Workflow,
+    combined_output,
+    get_workflow,
+    sealed_params_aad,
+)
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +190,26 @@ def open_tenant_files(
         raise PrepareError(
             f"The stored credentials could not be opened ({type(exc).__name__})."
         ) from None
+
+
+def open_sealed_params(
+    job: Job, tenant: Tenant, private_key: X25519PrivateKey
+) -> dict[str, Any]:
+    """The job's sealed parameters, opened ({} if none). Raises PrepareError."""
+    blob = job.params.get(SEALED_PARAMS_KEY) if isinstance(job.params, dict) else None
+    if blob is None:
+        return {}
+    try:
+        value = open_json(blob, private_key, associated_data=sealed_params_aad(tenant.id))
+    except (InvalidTag, ValueError):
+        log.warning("sealed parameters of job %s could not be opened", job.id)
+        raise PrepareError(
+            "The job's protected parameters could not be decrypted (wrong credential key?). "
+            "Start a new job."
+        ) from None
+    if not isinstance(value, dict):
+        raise PrepareError("The job's protected parameters are malformed. Start a new job.")
+    return value
 
 
 def error_outcome(exc: Exception) -> StepOutcome:
@@ -414,6 +442,7 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
 
     try:
         files = open_tenant_files(session, tenant, private_key)
+        sealed = open_sealed_params(job, tenant, private_key)
     except PrepareError as exc:
         _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
         return
@@ -438,7 +467,8 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             _audit_step(session, job=job, tenant=tenant, step=step, status=StepStatus.running,
                         exit_code=None, actor=actor)
             _commit(session, job)  # nothing stays open while GAM runs
-            ctx = StepContext(session=session, tenant=tenant, job=job, step=step, cfg_dir=cfg_dir)
+            ctx = StepContext(session=session, tenant=tenant, job=job, step=step,
+                              cfg_dir=cfg_dir, sealed=sealed)
             try:
                 outcome = workflow.execute(step, ctx)
             except Exception as exc:  # a workflow error must not leave the step running

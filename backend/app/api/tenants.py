@@ -10,6 +10,7 @@ POST   /api/tenants/{tenant_id}/members           (owner or tenant admin) set a 
 PUT    /api/tenants/{tenant_id}/credentials       (owner) upload or replace the GAM files
 DELETE /api/tenants/{tenant_id}/credentials       (owner) delete the stored GAM files
 POST   /api/tenants/{tenant_id}/health-check      (owner or tenant admin) queue a check
+                                                   (or return the one still active)
 
 Credential contents are never returned: responses carry file names only.
 All routes here use TenantScopedRoute; see app/auth/tenant_guard.py.
@@ -43,7 +44,7 @@ from app.auth.tenant_guard import TenantScopedRoute
 from app.db import session_scope
 from app.gam.validate import Email, assert_in_tenant
 from app.jobs.queue import create_job, plan_job
-from app.models import Job, Membership, Role, Tenant, TenantStatus, User
+from app.models import Job, JobStatus, Membership, Role, Tenant, TenantStatus, User
 from app.tenants.service import (
     ALLOWED_FILES,
     MAX_FILE_BYTES,
@@ -56,6 +57,7 @@ from app.tenants.service import (
 from app.workflows.health import HEALTH_WORKFLOW
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants"], route_class=TenantScopedRoute)
+_ACTIVE_JOB = (JobStatus.queued, JobStatus.running, JobStatus.waiting)
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
@@ -412,6 +414,19 @@ def request_health_check(
     membership: Annotated[Membership, Depends(require_tenant_role(Role.admin))],
     user: Annotated[User, Depends(current_user)],
 ) -> JobCreated:
+    """A check that is still queued, running or waiting is returned instead of a new one,
+    so a double-click queues one check. The tenant row lock serializes the decision."""
     with session_scope() as db:
-        job = _queue_health_check(db, _tenant_or_404(db, tenant_id), user)
+        tenant = _tenant_or_404(db, tenant_id, lock=True)
+        if tenant.status != TenantStatus.disabled:
+            active = db.scalar(
+                select(Job.id)
+                .where(Job.tenant_id == tenant.id, Job.workflow == HEALTH_WORKFLOW,
+                       Job.status.in_(_ACTIVE_JOB))
+                .order_by(Job.created_at.desc())
+                .limit(1)
+            )
+            if active is not None:
+                return JobCreated(job_id=active)
+        job = _queue_health_check(db, tenant, user)
         return JobCreated(job_id=job.id)

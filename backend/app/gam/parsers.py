@@ -3,7 +3,8 @@
 
 import csv
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 # overallTransferStatusCode values: pending, inProgress, completed, failed.
 COMPLETED = "completed"
@@ -16,6 +17,9 @@ class TransferStatus:
     old_owner: str
     new_owner: str
     status: str  # overallTransferStatusCode
+    # requestTime as GAM prints it (UTC "...Z", or local time with an offset when GAM is
+    # set to convert times); None when missing or unreadable. Not part of equality.
+    request_time: datetime | None = field(default=None, compare=False)
 
     @property
     def completed(self) -> bool:
@@ -49,5 +53,41 @@ def parse_transfers_csv(stdout: str) -> list[TransferStatus]:
                 old_owner=row["oldOwnerUserEmail"].lower(),
                 new_owner=row["newOwnerUserEmail"].lower(),
                 status=row["overallTransferStatusCode"],
+                request_time=_parse_time(row.get("requestTime") or ""),
             )
     return list(seen.values())
+
+
+def _parse_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+USER_GROUP_COLUMNS = ("User", "Group", "Role", "Status", "Delivery")
+
+
+def parse_user_groups_csv(stdout: str) -> list[dict[str, str]]:
+    """Parse `gam user <e> print groups` CSV: one {group, role, status, delivery} per row.
+
+    Group addresses are lowercased; GAM's order is kept. Empty output or a header alone
+    gives []. Raises ValueError if the output is not the expected CSV.
+    """
+    text = stdout.strip()
+    if not text:
+        return []
+    reader = csv.DictReader(io.StringIO(text))
+    if not {"User", "Group", "Role"} <= set(reader.fieldnames or []):
+        raise ValueError("unexpected output from print groups")
+    return [
+        {
+            "group": row["Group"].strip().lower(),
+            "role": (row.get("Role") or "").strip(),
+            "status": (row.get("Status") or "").strip(),
+            "delivery": (row.get("Delivery") or "").strip(),
+        }
+        for row in reader
+        if (row.get("Group") or "").strip()
+    ]
