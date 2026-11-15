@@ -14,6 +14,9 @@ Runtime dependencies and their licenses. All are compatible with AGPL-3.0-only. 
 | alembic | MIT |
 | cryptography | Apache-2.0 OR BSD-3-Clause |
 | Authlib | BSD-3-Clause |
+| joserfc (used by Authlib for id_token checks) | BSD-3-Clause |
+| itsdangerous (signs the short-lived OIDC state cookie) | BSD-3-Clause |
+| starlette (used by FastAPI) | BSD-3-Clause |
 | httpx | BSD-3-Clause |
 | argon2-cffi | MIT |
 | pydantic | MIT |

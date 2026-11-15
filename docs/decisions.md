@@ -23,3 +23,18 @@ The development host is Windows with Python 3.10 only; the backend needs Python 
 
 ## 2026-11-15: Source repository URL is a placeholder
 `GAMUT_SOURCE_URL` defaults to `https://github.com/OWNER/gamut` until the owner supplies the real repository.
+
+## 2026-11-15: Panel users are pre-registered; OIDC never creates users
+An owner adds a user with `POST /api/users` (email, display name). OIDC sign-in only succeeds for an existing user with a verified email; the first sign-in links the provider subject to the user, and a later sign-in with a different subject for that email is refused. Unknown emails get 403 and an `auth.login_failed` audit event. Tenant admins and owners grant roles with `POST /api/tenants/{tenant_id}/members` (`{email, role}`, role admin, technician or auditor); an unknown email gets 422 telling the caller to have an owner add the user first.
+
+## 2026-11-15: Sessions and CSRF
+The session cookie (`gamut_session`, HttpOnly, Secure, SameSite=Lax) holds a random 32-byte id; only its SHA-256 is stored. Sessions end 12 h after creation or after 2 h idle. Each session has a random CSRF token, sent at login in a readable `gamut_csrf` cookie (Secure, SameSite=Lax). POST, PUT, PATCH and DELETE must send `X-CSRF-Token` equal to both the cookie and the session's stored token. The check is part of authentication, so every authenticated state change is covered; a test enumerates the routes to prove it. The login endpoints are exempt and rate-limited instead. The OIDC state and nonce travel in a separate short-lived cookie (`gamut_oidc`, signed with `GAMUT_SECRET_KEY`, path `/api/auth`, 10 minutes).
+
+## 2026-11-15: Tenant isolation is enforced by the route class
+Every route with a `{tenant_id}` path parameter uses `TenantScopedRoute`, which checks the session and the caller's membership before FastAPI reads the body. A non-member gets 404 (never 422 or 403), as if the tenant did not exist. `create_app` refuses to start if a `{tenant_id}` route uses another route class, and `tests/test_tenant_isolation.py` enumerates the app's routes so new routes are covered automatically.
+
+## 2026-11-15: Rate limits are per web process (Milestone 1)
+Login (10 per minute per client IP) and job creation (30 per minute per user) use an in-memory sliding window. The counts reset on restart and are kept separately by each web process. GAMUT runs one web process; a shared store is needed if that changes. Behind a reverse proxy the client IP comes from `X-Forwarded-For`, trusted only from `GAMUT_FORWARDED_ALLOW_IPS`.
+
+## 2026-11-15: OIDC sign-in is optional; the bootstrap owner always works
+OIDC is enabled when `GAMUT_OIDC_CLIENT_ID` and `GAMUT_OIDC_CLIENT_SECRET` are set (then `GAMUT_PUBLIC_BASE_URL` is required). Without it, `/api/auth/login` returns 503 and only the bootstrap owner can sign in. The bootstrap owner is created once from `GAMUT_BOOTSTRAP_ADMIN_EMAIL`/`GAMUT_BOOTSTRAP_ADMIN_PASSWORD` (argon2id); later starts never change it, and every use is audited as `auth.bootstrap_login`.

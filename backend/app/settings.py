@@ -46,6 +46,23 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: SecretStr | None = None
 
+    # Web: OpenID Connect sign-in (Google by default). Sign-in through OIDC is enabled
+    # when the client id and secret are both set; the bootstrap admin works without it.
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_metadata_url: str = "https://accounts.google.com/.well-known/openid-configuration"
+    # Web: external https URL of the panel (behind the TLS reverse proxy), for example
+    # https://gamut.example.com. The OIDC redirect URI is <public_base_url>/api/auth/callback.
+    public_base_url: str | None = None
+    # Web: proxy addresses whose X-Forwarded-For is trusted (uvicorn forwarded_allow_ips);
+    # the client address feeds the login rate limit.
+    forwarded_allow_ips: str = "127.0.0.1"
+
+    @property
+    def oidc_enabled(self) -> bool:
+        secret = self.oidc_client_secret
+        return bool(self.oidc_client_id and secret and secret.get_secret_value())
+
     @model_validator(mode="after")
     def _role_requirements(self) -> Self:
         # SettingsError is not a ValueError, so pydantic lets it through unwrapped
@@ -61,6 +78,8 @@ class Settings(BaseSettings):
                     "role 'web' must not have GAMUT_CREDENTIAL_PRIVATE_KEY_FILE set; "
                     "only the worker may hold the credential private key"
                 )
+            if self.oidc_enabled and not self.public_base_url:
+                missing.append("GAMUT_PUBLIC_BASE_URL")
         if self.role == "worker" and self.credential_private_key_file is None:
             missing.append("GAMUT_CREDENTIAL_PRIVATE_KEY_FILE")
         if missing:

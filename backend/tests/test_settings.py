@@ -95,3 +95,24 @@ def test_reads_prefixed_env_and_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.role == "cli"
     assert settings.gam_bin == "gam"
     assert settings.source_url == "https://github.com/OWNER/gamut"
+
+
+def test_web_with_oidc_requires_public_base_url() -> None:
+    with pytest.raises(SettingsError, match="GAMUT_PUBLIC_BASE_URL"):
+        Settings(
+            role="web", database_url=DB, secret_key="k", credential_public_key="pub",
+            oidc_client_id="id", oidc_client_secret="SECRETKEY-5e0d",
+        )
+    without_oidc = Settings(role="web", database_url=DB, secret_key="k", credential_public_key="p")
+    assert not without_oidc.oidc_enabled
+
+
+def test_cli_web_reports_missing_settings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.cli import main
+
+    monkeypatch.setenv("GAMUT_DATABASE_URL", DB)
+    monkeypatch.delenv("GAMUT_SECRET_KEY", raising=False)
+    assert main(["web"]) == 2
+    assert "GAMUT_SECRET_KEY" in capsys.readouterr().err
