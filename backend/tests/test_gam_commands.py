@@ -19,7 +19,8 @@ def test_builders_match_wiki():
     assert c.remove_from_all_groups(E) == ["user", "a@x.com", "delete", "groups"]
     assert c.create_drive_transfer(E, Email("m@x.com")) == [
         "create", "datatransfer", "a@x.com", "gdrive", "m@x.com"]
-    assert c.get_transfer_status("1234567890") == ["info", "datatransfer", "1234567890"]
+    assert c.list_transfers(E, Email("m@x.com")) == [
+        "print", "datatransfers", "olduser", "a@x.com", "newuser", "m@x.com"]
     assert c.info_user(E) == ["info", "user", "a@x.com", "quick", "formatjson"]
     assert c.delete_user(E) == ["delete", "user", "a@x.com"]
     assert c.info_domain() == ["info", "domain", "formatjson"]
@@ -38,12 +39,6 @@ def test_builders_reject_plain_strings():
 def test_vacation_requires_message():
     with pytest.raises(ValueError):
         c.vacation_on(E, FreeText("Away"), FreeText(""))
-
-
-def test_transfer_id_validation():
-    for bad in ["", "-x", "a b", "1;2", "x" * 65]:
-        with pytest.raises(ValueError):
-            c.get_transfer_status(bad)
 
 
 def test_redact_argv():

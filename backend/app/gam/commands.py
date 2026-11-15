@@ -6,18 +6,15 @@ docs/decisions.md. User input fills fixed positions only and never becomes part 
 that is split later.
 """
 
-import re
-
 from app.gam.validate import Email, FreeText
 
 __all__ = [
     "Email", "FreeText", "check_service_account", "create_drive_transfer", "delete_user",
-    "deprovision", "get_transfer_status", "info_domain", "info_user", "print_user_groups",
+    "deprovision", "info_domain", "info_user", "list_transfers", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
     "suspend_user", "vacation_on",
 ]
 
-_TRANSFER_ID_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 REDACTED = "[redacted]"
 
 
@@ -71,11 +68,13 @@ def create_drive_transfer(e: Email, manager: Email) -> list[str]:
     return ["create", "datatransfer", _email(e), "gdrive", _email(manager)]
 
 
-def get_transfer_status(transfer_id: str) -> list[str]:
-    """Text output; completion is the line `Overall Transfer Status: completed`."""
-    if not _TRANSFER_ID_RE.fullmatch(transfer_id):
-        raise ValueError("invalid data transfer id")
-    return ["info", "datatransfer", transfer_id]
+def list_transfers(old_owner: Email, new_owner: Email) -> list[str]:
+    """CSV of data transfers from old_owner to new_owner (see app.gam.parsers).
+
+    One row per application per transfer, oldest request first. Used both to find a
+    transfer after `create_drive_transfer` and to poll its overallTransferStatusCode.
+    """
+    return ["print", "datatransfers", "olduser", _email(old_owner), "newuser", _email(new_owner)]
 
 
 def info_user(e: Email) -> list[str]:
