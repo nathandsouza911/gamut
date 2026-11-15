@@ -29,6 +29,7 @@ client secrets, private keys), in case GAM ever prints one.
 import json
 import logging
 import re
+import uuid
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -85,6 +86,32 @@ MAX_QUOTA_RETRIES = 6
 
 class PrepareError(Exception):
     """The job cannot start; the message is safe to show to an operator."""
+
+
+class LeaseLost(Exception):
+    """Another worker claimed the job (its claim_token changed): stop without writing."""
+
+
+# session.info key holding the claim token run_steps fences its writes with.
+_FENCE_KEY = "gamut.claim_token"
+
+
+def _commit(session: Session, job: Job) -> None:
+    """Commit, but only while the job still carries this run's claim token.
+
+    The job row is locked (FOR UPDATE) and its token compared inside the transaction
+    being committed, so a worker whose lease was taken over can never commit job or
+    step state over the new owner's. On a mismatch nothing is written: LeaseLost.
+    """
+    token = session.info.get(_FENCE_KEY)
+    if token is not None:
+        with session.no_autoflush:
+            current = session.scalar(
+                select(Job.claim_token).where(Job.id == job.id).with_for_update()
+            )
+        if current != token:
+            raise LeaseLost(str(job.id))
+    session.commit()
 
 
 def _collect(value: Any, found: set[str]) -> None:
@@ -237,7 +264,7 @@ def _record(
     session.flush()
     _audit_step(session, job=job, tenant=tenant, step=step, status=outcome.status,
                 exit_code=outcome.exit_code, actor=actor)
-    session.commit()
+    _commit(session, job)
 
 
 def _finish(
@@ -258,7 +285,7 @@ def _finish(
         session, actor=actor, tenant_id=tenant.id, action=f"job.{status.value}",
         target=job_target(job, tenant), details=details,
     )
-    session.commit()
+    _commit(session, job)
 
 
 def _fail_before_start(
@@ -308,7 +335,13 @@ def _quota_wait(step: JobStep, outcome: StepOutcome) -> StepOutcome:
     )
 
 
-def run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> None:
+def run_steps(
+    session: Session,
+    job: Job,
+    private_key: X25519PrivateKey,
+    *,
+    claim_token: uuid.UUID | None = None,
+) -> None:
     """Run `job`'s runnable steps in order (see the module docstring).
 
     Sets: job.status running -> succeeded | failed | waiting, job.started_at (first
@@ -318,12 +351,25 @@ def run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> None
     waiting steps. Commits after each transition. A disabled tenant, missing or
     undecryptable credentials, or a worker that cannot run GAM or create the job
     directory fail the job with an operator-readable message on the first runnable step.
+
+    claim_token (the value claim_next gave the job) fences every commit: once another
+    worker has claimed the job, this run stops at its next write and writes nothing
+    (it logs and returns). A GAM call already running is not killed; it finishes (within
+    its timeout) and its result is discarded. The new owner runs that step again, which
+    is safe because steps are idempotent, whereas killing GAM mid-call could leave a
+    change half-applied. Without a token (tests, tools) writes are not fenced.
     """
+    job_id = job.id
     previous = session.expire_on_commit
     session.expire_on_commit = False  # no lazy loads (= transactions) while GAM runs
+    session.info[_FENCE_KEY] = claim_token
     try:
         _run_steps(session, job, private_key)
+    except LeaseLost:
+        session.rollback()
+        log.warning("job %s was claimed by another worker; this run stopped", job_id)
     finally:
+        session.info.pop(_FENCE_KEY, None)
         session.expire_on_commit = previous
 
 
@@ -357,7 +403,7 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             "installation and its job directory (GAMUT_JOB_DIR).", actor,
         )
         return
-    session.commit()
+    _commit(session, job)
     if any(s.status == StepStatus.failed for s in all_steps):
         # Only retry_step or skip_step resolve a failed step.
         _finish(session, job, tenant, workflow, JobStatus.failed, actor)
@@ -391,7 +437,7 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             session.flush()
             _audit_step(session, job=job, tenant=tenant, step=step, status=StepStatus.running,
                         exit_code=None, actor=actor)
-            session.commit()  # nothing stays open while GAM runs
+            _commit(session, job)  # nothing stays open while GAM runs
             ctx = StepContext(session=session, tenant=tenant, job=job, step=step, cfg_dir=cfg_dir)
             try:
                 outcome = workflow.execute(step, ctx)
@@ -409,6 +455,6 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             if outcome.status == StepStatus.waiting:
                 job.status = JobStatus.waiting
                 job.lease_until = None
-                session.commit()
+                _commit(session, job)
                 return
     _finish(session, job, tenant, workflow, JobStatus.succeeded, actor)

@@ -161,7 +161,8 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
     `running` whose lease expired (its worker died). Rows locked by another transaction
     are skipped (FOR UPDATE SKIP LOCKED), and so are tenants that already have a running
     job with a live lease. The claimed job becomes `running` with lease_until = now +
-    lease_s, and a `job.claimed` event records the worker and the previous status.
+    lease_s and a fresh claim_token (run_job fences its writes with it), and a
+    `job.claimed` event records the worker and the previous status.
     """
     advisory_xact_lock(session, CLAIM_LOCK_KEY)
     now = _now()
@@ -198,6 +199,7 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
     previous = job.status
     job.status = JobStatus.running
     job.lease_until = now + timedelta(seconds=lease_s)
+    job.claim_token = uuid.uuid4()
     session.flush()
     tenant = session.get(Tenant, job.tenant_id)
     append_event(
@@ -220,12 +222,21 @@ def claim_next(session: Session, worker_id: str, lease_s: int = LEASE_S) -> Job 
 
 
 class _Heartbeat:
-    """Extends a running job's lease every `interval_s` seconds from its own thread."""
+    """Extends a running job's lease every `interval_s` seconds from its own thread.
 
-    def __init__(self, job_id: uuid.UUID, lease_s: float, interval_s: float) -> None:
+    Only while the job still carries `claim_token`: once another worker has claimed it
+    (or the job stopped running) the heartbeat sets `lost` and stops.
+    """
+
+    def __init__(
+        self, job_id: uuid.UUID, claim_token: uuid.UUID | None, lease_s: float,
+        interval_s: float,
+    ) -> None:
         self.job_id = job_id
+        self.claim_token = claim_token
         self.lease_s = lease_s
         self.interval_s = interval_s
+        self.lost = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
 
@@ -233,13 +244,21 @@ class _Heartbeat:
         while not self._stop.wait(self.interval_s):
             try:
                 with session_scope() as session:
-                    session.execute(
+                    result = session.execute(
                         update(Job)
-                        .where(Job.id == self.job_id, Job.status == JobStatus.running)
+                        .where(Job.id == self.job_id, Job.status == JobStatus.running,
+                               Job.claim_token == self.claim_token)
                         .values(lease_until=_now() + timedelta(seconds=self.lease_s))
                     )
+                    renewed = getattr(result, "rowcount", 0)
             except Exception as exc:  # the lease is the backstop; keep trying
                 log.warning("lease heartbeat failed: %s", type(exc).__name__)
+                continue
+            if not renewed:
+                self.lost.set()
+                log.info("job %s: not running under this claim; heartbeat stopped",
+                         self.job_id)
+                return
 
     def __enter__(self) -> "_Heartbeat":
         self._thread.start()
@@ -263,15 +282,19 @@ def run_job(
     """Run a job returned by claim_next, in its own session, renewing its lease.
 
     Runs its steps through app.jobs.execute.run_steps (one materialized GAM directory
-    for the whole run). Exceptions (for example the database going away) propagate; the
-    job's lease then expires and another claim picks it up again.
+    for the whole run), fenced by the claim token the job carried when it was claimed:
+    if another worker reclaims the job meanwhile, this run stops at its next write
+    without writing anything, and the heartbeat stops renewing the lease. Other
+    exceptions (for example the database going away) propagate; the job's lease then
+    expires and another claim picks it up again.
     """
+    job_id, token = job.id, job.claim_token  # as claimed, not as stored now
     with Session(get_engine(), expire_on_commit=False) as session, \
-            _Heartbeat(job.id, lease_s, heartbeat_s):
-        fresh = session.get(Job, job.id)
+            _Heartbeat(job_id, token, lease_s, heartbeat_s):
+        fresh = session.get(Job, job_id)
         if fresh is None:
             return
-        run_steps(session, fresh, private_key)
+        run_steps(session, fresh, private_key, claim_token=token)
 
 
 # --- Retry and skip ------------------------------------------------------------------

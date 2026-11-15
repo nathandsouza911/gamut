@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from sqlalchemy import Engine, select, text
+from sqlalchemy import Engine, select, text, update
 from sqlalchemy.orm import Session
 
 from app.audit.chain import verify_chain
@@ -540,4 +540,89 @@ def test_job_records_gam_version(
     assert {e.details["gam_version"] for e in _events(app_session, "job.step.")} == {
         "GAM 7.x.y - fake"
     }
+    assert verify_chain(app_session).ok
+
+
+# --- Claim-token fencing -------------------------------------------------------------
+
+def _steal(session: Session, job_id: uuid.UUID, worker: str) -> Job:
+    """Expire the job's lease and claim it as `worker`, in one transaction."""
+    session.execute(
+        update(Job).where(Job.id == job_id)
+        .values(lease_until=datetime.now(UTC) - timedelta(seconds=1))
+    )
+    claimed = claim_next(session, worker)
+    assert claimed is not None and claimed.id == job_id
+    return claimed
+
+
+def test_reclaimed_job_rejects_the_old_workers_writes(
+    app_session: Session, app_engine: Engine, make_ready_tenant: Callable[..., Tenant],
+    fake_gam: Any, job_dir: Path, credential_keys: Keys,
+) -> None:
+    tenant = make_ready_tenant()
+    job = _job(app_session, tenant, {"key": "a", "args": ["info", "a"]})
+    with Session(app_engine, expire_on_commit=False) as first:
+        old = claim_next(first, "worker-a")
+    assert old is not None
+    with Session(app_engine, expire_on_commit=False) as second:
+        new = _steal(second, job.id, "worker-b")
+    assert new.claim_token != old.claim_token
+
+    run_job(old, credential_keys[0])  # the old worker comes back
+    assert fake_gam.calls() == []
+    fresh = _reload(app_session, job)
+    assert fresh.status == JobStatus.running
+    assert fresh.claim_token == new.claim_token and fresh.lease_until == new.lease_until
+    assert _steps(app_session, job)[0].status == StepStatus.pending
+    assert _events(app_session, "job.step.") == []
+    assert os.listdir(job_dir) == []
+
+    run_job(new, credential_keys[0])
+    assert _reload(app_session, job).status == JobStatus.succeeded
+    assert len(fake_gam.calls()) == 1
+
+
+def test_lease_lost_during_gam_drops_the_old_result_and_stops_the_heartbeat(
+    app_session: Session, app_engine: Engine, make_ready_tenant: Callable[..., Tenant],
+    fake_gam: Any, job_dir: Path, credential_keys: Keys,
+) -> None:
+    tenant = make_ready_tenant()
+    job = _job(app_session, tenant, {"key": "slow", "args": ["info", "slow"]},
+               {"key": "next", "args": ["info", "next"]})
+    fake_gam.scenario([{"match": ["info", "slow"], "sleep": 1.5}])
+    with Session(app_engine, expire_on_commit=False) as first:
+        old = claim_next(first, "worker-a", lease_s=60)
+    assert old is not None
+    stolen: list[Job] = []
+
+    def steal_while_gam_runs() -> None:
+        for _ in range(100):
+            if fake_gam.calls():
+                break
+            threading.Event().wait(0.05)
+        with Session(app_engine, expire_on_commit=False) as second:
+            stolen.append(_steal(second, job.id, "worker-b"))
+
+    thief = threading.Thread(target=steal_while_gam_runs)
+    thief.start()
+    run_job(old, credential_keys[0], lease_s=60, heartbeat_s=0.2)
+    thief.join(timeout=10)
+    assert len(stolen) == 1
+    new = stolen[0]
+
+    fresh = _reload(app_session, job)
+    assert fresh.status == JobStatus.running
+    assert fresh.claim_token == new.claim_token
+    assert fresh.lease_until == new.lease_until  # the old heartbeat stopped renewing
+    steps = _steps(app_session, job)
+    assert [s.status for s in steps] == [StepStatus.running, StepStatus.pending]
+    assert [e.action for e in _events(app_session, "job.step.")] == ["job.step.running"]
+    assert [c["argv"] for c in fake_gam.calls()] == [["info", "slow"]]  # stopped there
+    assert os.listdir(job_dir) == []
+
+    fake_gam.scenario([])
+    run_job(new, credential_keys[0])  # the new owner re-runs the interrupted step
+    assert _reload(app_session, job).status == JobStatus.succeeded
+    assert [c["argv"][1] for c in fake_gam.calls()] == ["slow", "slow", "next"]
     assert verify_chain(app_session).ok

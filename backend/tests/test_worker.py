@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.audit.chain import verify_chain
@@ -487,3 +487,43 @@ def test_cli_worker_refuses_without_key(monkeypatch: pytest.MonkeyPatch) -> None
     finally:
         get_settings.cache_clear()
     assert exc.value.code == "credential private key missing"
+
+
+def test_reclaimed_action_drops_the_old_runners_result(
+    app_session: Session, app_engine: Any, make_ready_tenant: Callable[..., Tenant],
+    fake_gam: Any, job_dir: Path, credential_keys: Keys,
+) -> None:
+    """The handler runs past its lease; another worker claims the action meanwhile."""
+    stolen: list[ScheduledAction] = []
+
+    def slow_handler(ctx: ActionContext) -> ActionResult:
+        with Session(app_engine, expire_on_commit=False) as other:
+            other.execute(
+                text("UPDATE scheduled_actions SET lease_until = now() - interval '1 second'"
+                     " WHERE id = :i"), {"i": ctx.action.id},
+            )
+            row = scheduled._claim(other, 900)
+            assert row is not None
+            stolen.append(row)
+        return ActionResult(status=ScheduledStatus.done, result="deleted (old runner)")
+
+    register_action("test_slow", slow_handler)
+    try:
+        tenant = make_ready_tenant()
+        job = _job(app_session, tenant, {"key": "a"})
+        action = create_scheduled_action(
+            app_session, tenant_id=tenant.id, job_id=job.id, action="test_slow",
+            run_at=datetime.now(UTC) - timedelta(minutes=1), params={}, actor="x",
+        )
+        app_session.commit()
+        assert run_due_actions(app_session, credential_keys[0]) == 1
+    finally:
+        scheduled._HANDLERS.pop("test_slow", None)
+    row = _sa(app_session, action)
+    assert row.status == ScheduledStatus.running
+    assert row.result is None
+    assert row.claim_token == stolen[0].claim_token
+    actions = [e.action for e in _events(app_session) if e.action.startswith("scheduled")]
+    assert actions == ["scheduled_action.created", "scheduled_action.started",
+                       "scheduled_action.started"]  # no result from the old runner
+    assert os.listdir(job_dir) == []

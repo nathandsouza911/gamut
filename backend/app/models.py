@@ -211,6 +211,8 @@ class Job(Base):
     idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
     gam_version: Mapped[str | None] = mapped_column(Text)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # New on every claim; state is written only while the row still carries it.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = _created_at()
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -279,6 +281,8 @@ class ScheduledAction(Base):
     result: Mapped[str | None] = mapped_column(Text)
     # Set while a worker runs the action; an expired lease means the worker died.
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # New on every claim; state is written only while the row still carries it.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = _created_at()
 
 

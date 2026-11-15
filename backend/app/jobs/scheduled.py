@@ -4,7 +4,8 @@
 A workflow step creates a `scheduled` row with create_scheduled_action. Until it runs it
 can be cancelled (cancel_scheduled_action). The worker loop calls run_due_actions each
 tick: it claims due rows with FOR UPDATE SKIP LOCKED, marks them `running` with a lease
-(a row whose worker died is claimed again once the lease expires), decrypts the
+and a fresh claim token (a row whose worker died is claimed again once the lease
+expires; the old worker's result is then dropped, because its token no longer matches), decrypts the
 tenant's GAM files into a per-action directory and calls the action's handler. The
 handler returns done, refused (its guard said no) or failed; the result is stored and
 audited. Handlers are looked up by name in a registry (register_action); workflow
@@ -189,6 +190,7 @@ def _claim(session: Session, lease_s: int) -> ScheduledAction | None:
     reclaimed = row.status == ScheduledStatus.running
     row.status = ScheduledStatus.running
     row.lease_until = now + timedelta(seconds=lease_s)
+    row.claim_token = uuid.uuid4()
     session.flush()
     job = session.get(Job, row.job_id)
     append_event(
@@ -204,9 +206,23 @@ def _claim(session: Session, lease_s: int) -> ScheduledAction | None:
 
 
 def _finish(
-    session: Session, row: ScheduledAction, tenant: Tenant, actor: str, result: ActionResult,
-    secrets: list[str],
+    session: Session, row: ScheduledAction, token: uuid.UUID | None, tenant: Tenant,
+    actor: str, result: ActionResult, secrets: list[str],
 ) -> None:
+    """Store and audit the result, only while the row still carries this run's token.
+
+    If another worker reclaimed the action (its lease expired while the handler ran),
+    nothing is written: the new owner's run decides the result.
+    """
+    current = session.scalar(
+        select(ScheduledAction.claim_token).where(ScheduledAction.id == row.id)
+        .with_for_update()
+    )
+    if current != token:
+        session.rollback()
+        log.warning("scheduled action %s was claimed by another worker; result dropped",
+                    row.id)
+        return
     status = result.status if result.status in _FINAL else ScheduledStatus.failed
     row.status = status
     row.result = scrub(result.result, secrets)[:RESULT_MAX]
@@ -227,9 +243,11 @@ def _run_one(session: Session, row: ScheduledAction, private_key: X25519PrivateK
     if tenant is None or job is None:
         return  # deleted together with the tenant or job (cascade)
     actor = job_actor(session, job)
+    token = row.claim_token  # as claimed
 
     def fail(message: str, status: ScheduledStatus = ScheduledStatus.failed) -> None:
-        _finish(session, row, tenant, actor, ActionResult(status=status, result=message), [])
+        _finish(session, row, token, tenant, actor,
+                ActionResult(status=status, result=message), [])
 
     if tenant.status == TenantStatus.disabled:
         fail("The tenant is disabled, so the action did not run.", ScheduledStatus.refused)
@@ -261,7 +279,7 @@ def _run_one(session: Session, row: ScheduledAction, private_key: X25519PrivateK
             session.rollback()
             outcome = error_outcome(exc)
             result = ActionResult(status=ScheduledStatus.failed, result=outcome.output)
-    _finish(session, row, tenant, actor, result, secrets)
+    _finish(session, row, token, tenant, actor, result, secrets)
 
 
 def run_due_actions(
