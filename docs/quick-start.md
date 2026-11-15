@@ -28,7 +28,7 @@ GAMUT encrypts each tenant's uploaded GAM credentials with a public key; only th
 
 ```
 mkdir -p secrets
-docker compose run --rm --no-deps -T --user root -v "$PWD/secrets:/out" worker \
+docker compose run --rm --no-deps -T --user root -v ./secrets:/out worker \
   sh -c 'gamut gen-keys /out/credential_private_key && chown 10001:10001 /out/credential_private_key'
 ```
 
@@ -37,15 +37,17 @@ It prints two lines. The first says the private key was written (mode 0600; it n
 - replace the `GAMUT_CREDENTIAL_PUBLIC_KEY=EXAMPLE-DO-NOT-USE` line with the printed line;
 - set `GAMUT_PRIVATE_KEY_PATH=./secrets/credential_private_key`.
 
-The `chown` matters on Linux. The worker runs as uid 10001 and must read the 0600 file, so 10001 has to own it (then only that user and root can read it). The `secrets/` directory is ignored by git. If you create the key some other way, run `sudo chown 10001:10001 secrets/credential_private_key` yourself.
+The `chown` matters. The worker runs as uid 10001 and must read the 0600 file, so 10001 has to own it (then only that user and root can read it on the host). The `secrets/` directory is ignored by git. If you create the key some other way, run `sudo chown 10001:10001 secrets/credential_private_key` yourself. The command is run as root inside a throwaway container so it can do this without `sudo` on the host.
 
-**Docker Desktop (Windows, macOS):** bind-mounted files do not keep Linux ownership, so the `chown` changes nothing on the host and is harmless. The worker can read the file because Docker Desktop shows it inside the container with open read permission. Check with `docker compose logs worker` after step 4: `credential private key missing` or a permission error means the mount failed (see Troubleshooting). Treat the key file as sensitive on the host regardless.
+**Docker Desktop (Windows, macOS):** the same command works there. The `chown` inside the container is applied to the bind-mounted file (checked on Docker Desktop for Windows), and without it the worker cannot read the root-owned file and exits with `credential private key missing` (that message also covers an unreadable file). In Git Bash on Windows, set `MSYS_NO_PATHCONV=1` for the command so Git Bash does not rewrite `/out`; or run it from WSL. Treat the key file as sensitive on the host regardless: Windows file permissions are separate from the Linux ones, so keep it in a directory only you can read.
+
+Check with `docker compose logs worker` after step 4.
 
 **Back this key up now, separately from the database** ([backup-restore.md](backup-restore.md)). Without it, stored tenant credentials cannot be decrypted.
 
 ## 3. Edit the rest of `.env`
 
-- `GAMUT_BOOTSTRAP_ADMIN_PASSWORD`: a long passphrase for the break-glass owner `GAMUT_BOOTSTRAP_ADMIN_EMAIL`. It is read on first start only. With no password no owner is created, and without OIDC either, nobody can sign in.
+- `GAMUT_BOOTSTRAP_ADMIN_PASSWORD`: a long passphrase for the break-glass owner `GAMUT_BOOTSTRAP_ADMIN_EMAIL`. It is read on first start only (after the owner exists you can blank it in `.env`). With no password no owner is created, and without OIDC either, nobody can sign in.
 - `GAMUT_PUBLIC_BASE_URL`: the external https address of the panel, for example `https://gamut.example.com`.
 - `GAMUT_OIDC_CLIENT_ID` and `GAMUT_OIDC_CLIENT_SECRET` (optional): Google sign-in. The authorized redirect URI is `<GAMUT_PUBLIC_BASE_URL>/api/auth/callback`. An owner must add panel users first; OIDC never creates users.
 - `GAMUT_SOURCE_URL`: the repository URL shown in the UI footer.

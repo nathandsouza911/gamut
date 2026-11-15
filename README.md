@@ -28,9 +28,10 @@ cp .env.example .env
 for v in POSTGRES_PASSWORD GAMUT_OWNER_DB_PASSWORD GAMUT_APP_DB_PASSWORD GAMUT_SECRET_KEY; do
   sed -i "s|^$v=.*|$v=$(openssl rand -hex 32)|" .env
 done
-# generate the credential key pair (private key into ./secrets, owned by the worker's uid 10001)
+# generate the credential key pair (private key into ./secrets, owned by the worker's uid 10001;
+# in Git Bash on Windows prefix this command with MSYS_NO_PATHCONV=1)
 mkdir -p secrets
-docker compose run --rm --no-deps -T --user root -v "$PWD/secrets:/out" worker \
+docker compose run --rm --no-deps -T --user root -v ./secrets:/out worker \
   sh -c 'gamut gen-keys /out/credential_private_key && chown 10001:10001 /out/credential_private_key'
 # edit .env: paste the printed GAMUT_CREDENTIAL_PUBLIC_KEY line, set
 # GAMUT_PRIVATE_KEY_PATH=./secrets/credential_private_key, GAMUT_BOOTSTRAP_ADMIN_PASSWORD,
