@@ -18,6 +18,9 @@ RUN groupadd --gid 10001 gamut \
 WORKDIR /app
 COPY backend/pyproject.toml /app/backend/pyproject.toml
 COPY backend/app /app/backend/app
+# Migrations ship in the image; they run as gamut_owner (GAMUT_MIGRATE_DATABASE_URL).
+COPY backend/alembic.ini /app/backend/alembic.ini
+COPY backend/migrations /app/backend/migrations
 RUN pip install /app/backend \
  && mkdir -p /usr/share/doc/gam7 \
  && cp /usr/local/lib/python3.12/site-packages/gam7-*.dist-info/licenses/* /usr/share/doc/gam7/

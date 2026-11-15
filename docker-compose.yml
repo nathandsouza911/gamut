@@ -7,10 +7,17 @@ services:
       POSTGRES_USER: gamut
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: gamut
+      # Read by backend/docker/initdb/10-gamut-roles.sh on first start to create the roles.
+      GAMUT_OWNER_DB_PASSWORD: ${GAMUT_OWNER_DB_PASSWORD:?set GAMUT_OWNER_DB_PASSWORD in .env}
+      GAMUT_APP_DB_PASSWORD: ${GAMUT_APP_DB_PASSWORD:?set GAMUT_APP_DB_PASSWORD in .env}
     volumes:
       - gamut-db:/var/lib/postgresql/data
+      # Creates gamut_owner (owns the schema; migrations only) and gamut_app (web and
+      # worker; no UPDATE/DELETE on audit_events) the first time the volume is empty.
+      - ./backend/docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gamut -d gamut"]
+      # TCP check: during init the temporary server listens on the socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U gamut -d gamut"]
       interval: 5s
       timeout: 3s
       retries: 20
