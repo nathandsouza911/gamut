@@ -71,14 +71,14 @@ Caddy sets `X-Forwarded-For` itself and replaces any value sent by the client. S
 
 ### Client address and the login rate limit
 
-Login (10 per minute) is limited per client address, taken from `X-Forwarded-For`, which uvicorn honours only from `GAMUT_FORWARDED_ALLOW_IPS`. The default is `10.78.80.1`, the gateway of the Compose network that `docker-compose.yml` pins to `10.78.80.0/24` (override with `GAMUT_NETWORK_SUBNET` and `GAMUT_NETWORK_GATEWAY`; the trusted address follows the gateway). Because the port is published on `127.0.0.1`, a proxy on the host reaches the web container from that gateway address, and only host processes can connect there. If the setting were left at `127.0.0.1`, the proxy would never be trusted and every client would share the proxy's single bucket, so one attacker's failed logins would lock out everyone. If you run the proxy as another container, trust its address on the Compose network instead and do not publish the port. Never set it to a wide range such as `*`: any client could then forge its address and bypass the limit. The counters are in memory per web process and reset on restart.
+Login (10 per minute) is limited per client address, taken from `X-Forwarded-For`, which uvicorn honours only from `GAMUT_FORWARDED_ALLOW_IPS`. The default is `10.78.80.1`, the gateway of the Compose network that `docker-compose.yml` pins to `10.78.80.0/24` (override with `GAMUT_NETWORK_SUBNET` and `GAMUT_NETWORK_GATEWAY`; the trusted address follows the gateway). Because the port is published on `127.0.0.1`, a proxy on the host reaches the web container from that gateway address, and only host processes can connect there. Any local process on the host can therefore send its own `X-Forwarded-For` through that trusted gateway address and choose the client address the rate limit sees. If the setting were left at `127.0.0.1`, the proxy would never be trusted and every client would share the proxy's single bucket, so one attacker's failed logins would lock out everyone. If you run the proxy as another container, trust its address on the Compose network instead and do not publish the port. Never set it to a wide range such as `*`: any client could then forge its address and bypass the limit. The counters are in memory per web process and reset on restart.
 
 ## Other controls
 
-- Sign-in: OIDC (Google), with panel users pre-registered by an owner, plus one break-glass bootstrap owner (argon2id), audited on every use. Sessions are server-side, 12 hours maximum and 2 hours idle, revocable.
+- Sign-in: OIDC (Google), with panel users pre-registered by an owner, plus one break-glass bootstrap owner (argon2id), audited on every use. Sessions are server-side, 12 hours maximum and 2 hours idle, revocable. Disabling a user (owner, Users page) deletes all their sessions at once and blocks both sign-in methods.
 - Every `/api/tenants/{tenant_id}/...` route checks the caller's role on that tenant; a test enumerates the routes. A caller without a CSRF token on a state-changing request gets 403 before any tenant lookup, the same for every tenant id; an authenticated non-member otherwise gets 404 as if the tenant did not exist.
 - CSRF protection (`X-CSRF-Token`) on every state-changing authenticated route; SameSite=Lax HttpOnly cookies.
-- Confirmation: offboarding needs a preview and a signed, 10-minute token; account deletion is scheduled and needs a second confirmation.
+- Confirmation: offboarding needs a preview and a signed, 10-minute token; account deletion is scheduled and needs a second confirmation. The scheduled deletion deletes the Google account by its immutable id, and only while that account still has the offboarded address and is suspended, so a reactivated account or an address reused by someone else is never deleted. One unfinished offboarding per user and tenant; the tenant's own admin account cannot be offboarded.
 - No credential material in logs, test output or API responses; stored GAM output is capped and scrubbed.
 
 ## Known limits (Milestone 1)
@@ -86,5 +86,5 @@ Login (10 per minute) is limited per client address, taken from `X-Forwarded-For
 - One web process; rate limits are in memory.
 - Per-tenant concurrency is one running job, which does not cover scheduled actions: a scheduled account deletion may run while a job for the same tenant is running.
 - A compromised host, or anyone who can run `docker` on it, defeats the key split.
-- Real-domain behaviour of GAM and the scopes is not yet confirmed (Task 10).
+- The behaviour of GAM and the scopes has not yet been verified against a live domain.
 - GAM's `check serviceaccount` output is shown as GAM prints it; GAMUT does not compute a list of missing scopes.

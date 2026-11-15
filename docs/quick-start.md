@@ -89,6 +89,25 @@ Use a reverse proxy that terminates TLS and forwards to `127.0.0.1:8080`; a Cadd
 
 An owner creates the tenant in the UI (name, primary domain, admin email for the health check) and uploads the GAM files. [gam-setup.md](gam-setup.md) shows how to produce them and [scopes.md](scopes.md) lists the scopes to authorize. The tenant becomes active when the health check passes.
 
+## 8. Add technicians and auditors
+
+People sign in with their own Google account (OIDC, step 3). GAMUT never creates a user on first sign-in, so access takes two steps:
+
+1. **An owner adds the person** on the **Users** page (email and display name). This alone gives no access to any tenant.
+2. **An owner or the tenant's admin gives them a role** on the **Tenants** page, in that tenant's **Members** panel: enter their email and pick a role.
+   - `admin`: runs workflows and manages the tenant's members.
+   - `technician`: runs workflows (offboarding, retry, skip, cancel a scheduled deletion).
+   - `auditor`: reads jobs and the audit log only.
+
+   Choosing another role for an existing member changes it. Owners are not members: they reach every tenant.
+
+They can then sign in. Every change is in the audit log (`user.create`, `membership.set`).
+
+## 9. Remove access
+
+- **From one tenant:** an owner or the tenant's admin clicks **Remove** next to the person in that tenant's **Members** panel (`membership.remove`). From their next request the tenant is gone for them (404); their access to other tenants is unchanged.
+- **From the whole panel** (someone leaves your team): an owner clicks **Disable** next to them on the **Users** page (`user.disable`). All their sessions end at once, and they can no longer sign in with Google or with a password. Their memberships and audit history stay. An owner cannot disable their own account. There is no re-enable button in Milestone 1.
+
 ## Day-to-day
 
 - Stop: `docker compose stop`. The worker finishes the GAM step it is running first (it has up to 120 seconds). If it is killed before that, the job's lease expires and another worker run repeats the interrupted step; steps are idempotent.
