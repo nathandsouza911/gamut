@@ -10,7 +10,7 @@ On your own computer (not the GAMUT host), install GAM7 and run `gam create proj
 
 ## 2. Authorize the admin OAuth client with only the needed scopes
 
-Run `gam oauth create` and select only the five scopes in [scopes.md](scopes.md), section 1. Sign in as the admin account that GAMUT should act as (a super admin, or an admin role that can manage users, groups and data transfers).
+Run `gam oauth create` and select only the six scopes in [scopes.md](scopes.md), section 1. Sign in as the admin account that GAMUT should act as (a super admin, or an admin role that can manage users, groups and data transfers).
 
 This produces `oauth2.txt` (and uses `client_secrets.json`).
 

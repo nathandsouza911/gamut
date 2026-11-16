@@ -14,9 +14,10 @@ Acts as the admin account the operator signs in with. Used for directory actions
 | `https://www.googleapis.com/auth/admin.directory.user.security` | Sign out all sessions, deprovision (delete app passwords and OAuth tokens). |
 | `https://www.googleapis.com/auth/admin.directory.group` | List the user's groups and remove the user from them. |
 | `https://www.googleapis.com/auth/admin.datatransfer` | Create and read the Drive data transfer. |
+| `https://www.googleapis.com/auth/admin.directory.customer.readonly` | GAM reads the customer record to turn `my_customer` (its default customer id) into the real id before `info user` and other directory calls. Without it `info user` exits 12 (seen on a live test domain). |
 | `https://www.googleapis.com/auth/admin.directory.domain.readonly` | Health check: `info domain <primary domain>`. |
 
-(In GAM's scope menu the last one is "Directory API - Domains", set to read only. "Directory API - Customers" is not needed: the health check names the domain, so GAM reads only that domain. Without a domain name, `gam info domain` also reads user counts from the Reports API and fails without that scope.)
+(In GAM's scope menu the last two appear as "Directory API - Customers" and "Directory API - Domains", set to read only. The Reports API is not needed: the health check names the domain, so GAM reads only that domain. Without a domain name, `gam info domain` also reads user counts from the Reports API and fails without that scope.)
 
 The signed-in account also needs the matching Workspace admin privileges (for example a role that can manage users, groups and data transfers, or super admin). OAuth scopes limit what the token can call; the admin role limits what the account may do.
 
@@ -37,6 +38,7 @@ The health check (`gam user <admin email> check serviceaccount`) tests the scope
 | Step | GAM command (after `gam`) | Credential and scope |
 | --- | --- | --- |
 | Health check, domain | `info domain <primary domain> formatjson` | admin OAuth: domain.readonly |
+| (any directory call) | GAM's lookup of `my_customer` | admin OAuth: customer.readonly |
 | Health check, delegation | `user <admin> check serviceaccount` | service account: the recorded scopes (gmail.settings.basic) |
 | 1. Reset password | `update user <u> password random` | admin OAuth: admin.directory.user |
 | 2. Sign out | `user <u> signout` | admin OAuth: admin.directory.user.security |
