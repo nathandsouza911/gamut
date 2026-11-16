@@ -83,8 +83,8 @@ GAMUT's identity.
 
 ### Credential modes
 
-`tenants.auth_mode`: `oauth` (Milestone 1; default for existing rows) or `dasa` (default for new
-tenants). New column `tenants.customer_id` (nullable; required for `dasa`; validated
+`tenants.auth_mode`: `oauth` (Milestone 1) or `dasa`. The API default stays `oauth` so Milestone 1
+clients keep working; the guided setup always creates `dasa` tenants. New column `tenants.customer_id` (nullable; required for `dasa`; validated
 `^C[0-9a-z]{6,12}$` case-sensitive per Google's format — builder confirms the exact pattern).
 
 Allowed files by mode:
@@ -93,8 +93,9 @@ Allowed files by mode:
   secret).
 
 On upload, GAMUT parses `oauth2service.json` and stores its **non-secret** identifiers in clear on the
-credential row: `client_email`, `client_id`, `private_key_id`. They are shown in the wizard (to paste
-into the Admin console) and on the dashboard (key id, uploaded date). The private key is never returned.
+credential row: `client_email` and `client_id`. They are shown in the wizard (to paste into the Admin
+console) and on the dashboard. `private_key_id` is not stored: Milestone 1 already scrubs it from
+output as a secret value, and the upload date is enough for the key-age warning. The private key is never returned.
 Upload rejects a service account file without `type == "service_account"`, `client_email`, `client_id`,
 `private_key`. A `key_type` other than absent/`default` is rejected (no signjwt/yubikey in M2).
 
@@ -147,7 +148,7 @@ Text in the wizard is static content in the frontend; docs/gam-setup.md gets the
 
 Route `#/t/<id>` (tenant home). Visible to every role on the tenant. Shows:
 - Status badge, last health check time and per-check results, "Run health check" (admins/owner).
-- Credentials: mode, service account email, key id, uploaded date and age (warn ≥ 90 days, Google
+- Credentials: mode, service account email, uploaded date and age (warn ≥ 90 days, Google
   recommends rotation).
 - Needs attention: failed jobs (retry/skip pending), jobs waiting (Drive transfers) with how long.
 - Upcoming scheduled deletions with dates and a link to cancel (existing cancel route).
@@ -158,9 +159,8 @@ One new read-only API: `GET /api/tenants/{id}/dashboard` returning those aggrega
 
 ### Automatic daily health check
 
-The worker enqueues a health check for each `active`/`degraded` tenant whose last check is older than
-24 h and that has no health check queued or running. Actor `system`, audited like any job. This makes
-the dashboard status meaningful without anyone clicking.
+Already built in Milestone 1 (`app/worker/loop.py: enqueue_due_health_checks`). It plans through the
+health workflow, so it picks up the per-mode checks with no change.
 
 ### Docs
 
@@ -172,7 +172,7 @@ delete the key in Cloud console and unassign roles.
 ## Acceptance
 
 - Fake-GAM tests cover both modes, upload validation, gam.cfg generation, health check per check,
-  dashboard API isolation (404), daily scheduling.
+  dashboard API isolation (404).
 - Live, on the test tenant **before 2026-11-28** (trial end): add a DASA tenant through the wizard from
   scratch, health check passes, then a full offboarding of a throwaway user via the UI succeeds.
 - Milestone 1 OAuth tenants keep passing their tests unchanged.
