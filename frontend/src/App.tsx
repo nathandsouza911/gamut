@@ -8,6 +8,7 @@ import JobDetail from "./pages/JobDetail";
 import Jobs from "./pages/Jobs";
 import OffboardForm from "./pages/OffboardForm";
 import SignIn from "./pages/SignIn";
+import TenantSetup from "./pages/TenantSetup";
 import Tenants from "./pages/Tenants";
 import Users from "./pages/Users";
 import "./styles.css";
@@ -112,6 +113,16 @@ export default function App() {
     if (me === undefined) return <p>Loading...</p>;
     if (me === null) return <SignIn onSignedIn={signedIn} />;
     if (route.tenant === null && page === "users" && isOwner) return <Users meId={me.id} />;
+    if (route.tenant === null && page === "tenants" && arg === "new") {
+      return (
+        <TenantSetup
+          tenant={null}
+          isOwner={isOwner}
+          onChanged={() => void loadTenants()}
+          onCreated={(id) => go(`t/${id}/setup`)}
+        />
+      );
+    }
     if (route.tenant !== null && !routeKnown) {
       return tenantsLoaded ? (
         <p>You have no access to this tenant, or it does not exist.</p>
@@ -130,6 +141,17 @@ export default function App() {
       );
     }
     if (!tenant) return <p>You do not have access to any tenant yet.</p>;
+    if (page === "setup") {
+      return (
+        <TenantSetup
+          key={tenant.id}
+          tenant={tenant}
+          isOwner={isOwner}
+          onChanged={() => void loadTenants()}
+          onCreated={(id) => go(`t/${id}/setup`)}
+        />
+      );
+    }
     if (page === "jobs" && arg) {
       return (
         <JobDetail

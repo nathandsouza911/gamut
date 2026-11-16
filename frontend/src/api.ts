@@ -33,6 +33,10 @@ export interface Tenant {
   has_credentials: boolean;
   credential_files: string[];
   credentials_uploaded_at: string | null;
+  auth_mode: "oauth" | "dasa";
+  customer_id: string | null;
+  sa_client_email: string | null;
+  sa_client_id: string | null;
 }
 
 export interface OffboardParams {
@@ -92,6 +96,45 @@ export interface JobSummary {
   created_by: string | null;
   created_at: string;
   finished_at: string | null;
+}
+
+export interface HealthCheck {
+  key: string;
+  title: string;
+  status: string;
+  exit_code: number | null;
+  section: "credentials" | "roles" | "delegation" | null;
+}
+
+export interface Health {
+  job_id: string;
+  finished_at: string | null;
+  ok: boolean;
+  checks: HealthCheck[];
+}
+
+export interface CredentialsInfo {
+  auth_mode: "oauth" | "dasa";
+  file_names: string[];
+  uploaded_at: string | null;
+  age_days: number | null;
+  rotate_soon: boolean;
+  sa_client_email: string | null;
+  sa_client_id: string | null;
+}
+
+export interface WaitingJob extends JobSummary {
+  waiting_since: string | null;
+}
+
+export interface Dashboard {
+  tenant: Tenant;
+  health: Health | null;
+  credentials: CredentialsInfo | null;
+  failed_jobs: JobSummary[];
+  waiting_jobs: WaitingJob[];
+  scheduled: ScheduledAction[];
+  recent_jobs: JobSummary[];
 }
 
 export interface Job extends JobSummary {
@@ -188,8 +231,14 @@ export const api = {
   logout: () => request<void>("POST", "/api/auth/logout"),
 
   tenants: () => request<Tenant[]>("GET", "/api/tenants"),
-  createTenant: (b: { name: string; primary_domain: string; admin_email: string | null }) =>
-    request<Tenant>("POST", "/api/tenants", b),
+  createTenant: (b: {
+    name: string;
+    primary_domain: string;
+    admin_email: string | null;
+    auth_mode?: "oauth" | "dasa";
+    customer_id?: string | null;
+  }) => request<Tenant>("POST", "/api/tenants", b),
+  dashboard: (id: string) => request<Dashboard>("GET", `${t(id)}/dashboard`),
   uploadCredentials: (id: string, files: File[]) => {
     const form = new FormData();
     for (const f of files) form.append("files", f, f.name);
@@ -200,7 +249,7 @@ export const api = {
     );
   },
   healthCheck: (id: string) => request<{ job_id: string }>("POST", `${t(id)}/health-check`),
-  updateTenant: (id: string, b: { admin_email?: string | null; domains?: string[] }) =>
+  updateTenant: (id: string, b: { admin_email?: string | null; domains?: string[]; customer_id?: string | null }) =>
     request<Tenant>("PATCH", t(id), b),
   members: (id: string) => request<Member[]>("GET", `${t(id)}/members`),
   setMember: (id: string, email: string, role: MemberRole) =>

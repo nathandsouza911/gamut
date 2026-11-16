@@ -2,6 +2,21 @@
 
 Authorize only the scopes below. They are the smallest set that the Milestone 1 health check and the eight offboarding steps need, worked out from the GAM commands GAMUT runs (see [decisions.md](decisions.md), "GAM command syntax verified") and from the scope table in the pinned GAM 7.52.3 source (`gam/gamlib/glapi.py`) and the Google API references. They were checked on a live test domain (2026-11-16, GAM 7.52.3): the health check and all nine offboarding steps ran with exactly these scopes. This page will be corrected if Google answers differently.
 
+## Service account key (guided setup, "dasa" mode)
+
+One credential, `oauth2service.json`, and no OAuth client. Grants:
+
+| Grant | Where | Why |
+| --- | --- | --- |
+| `https://www.googleapis.com/auth/gmail.settings.basic` (one delegated scope) | Admin console, Security, API controls, Domain-wide delegation | Gmail auto-reply and GAM's `check serviceaccount`. |
+| User Management Admin, Groups Admin, and a custom role with Services, Data Transfer | Admin console, Account, Admin roles, Assign service accounts | Directory actions, group removal and Drive data transfers run as the service account. |
+
+Nothing else needs to be authorized.
+
+# Advanced: OAuth client setup
+
+The tables below are for tenants imported with an admin OAuth client (`oauth2.txt`) and are unchanged.
+
 GAM7 uses two kinds of credentials per domain, each with its own scopes.
 
 ## 1. Admin OAuth client (`oauth2.txt`)

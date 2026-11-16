@@ -54,3 +54,6 @@ pre { white-space: pre-wrap; background: #f0f0f3; padding: 0.5rem; border-radius
   .status { background: #3a3a40; }
   a { color: #8ab4ff; }
 }
+
+.setup-section { scroll-margin-top: 1rem; }
+.setup-section code { word-break: break-all; }
