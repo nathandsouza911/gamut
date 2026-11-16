@@ -1,6 +1,6 @@
 # Google API scopes
 
-Authorize only the scopes below. They are the smallest set that the Milestone 1 health check and the eight offboarding steps need, worked out from the GAM commands GAMUT runs (see [decisions.md](decisions.md), "GAM command syntax verified") and from the scope table in the pinned GAM 7.52.3 source (`gam/gamlib/glapi.py`) and the Google API references. They have **not yet been verified against a live domain**; this page will be corrected if Google answers differently.
+Authorize only the scopes below. They are the smallest set that the Milestone 1 health check and the eight offboarding steps need, worked out from the GAM commands GAMUT runs (see [decisions.md](decisions.md), "GAM command syntax verified") and from the scope table in the pinned GAM 7.52.3 source (`gam/gamlib/glapi.py`) and the Google API references. They were checked on a live test domain (2026-11-16, GAM 7.52.3): the health check and all nine offboarding steps ran with exactly these scopes. This page will be corrected if Google answers differently.
 
 GAM7 uses two kinds of credentials per domain, each with its own scopes.
 

@@ -2,7 +2,7 @@
 
 GAMUT is a self-hosted web admin panel for Google Workspace. It runs [GAM7](https://github.com/GAM-team/GAM) behind a web UI so technicians can perform common administration tasks (starting with user offboarding) and review every step in a tamper-evident audit log.
 
-Status: early development. Milestone 1 (offboarding, end to end) is built; it has not yet been run against a real Google Workspace tenant.
+Status: early development. Milestone 1 (offboarding, end to end) is built; it has been run end to end against a test Google Workspace tenant (see [docs/decisions.md](docs/decisions.md), "Live-domain acceptance").
 
 Licensed under the GNU Affero General Public License v3.0 only. See [LICENSE](LICENSE). The UI footer links to the source code, as AGPL-3.0 section 13 requires.
 

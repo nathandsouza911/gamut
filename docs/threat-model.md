@@ -86,5 +86,5 @@ Login (10 per minute) is limited per client address, taken from `X-Forwarded-For
 - One web process; rate limits are in memory.
 - Per-tenant concurrency is one running job, which does not cover scheduled actions: a scheduled account deletion may run while a job for the same tenant is running.
 - A compromised host, or anyone who can run `docker` on it, defeats the key split.
-- The behaviour of GAM and the scopes has not yet been verified against a live domain.
+- The behaviour of GAM and the scopes was checked on a live test domain (2026-11-16, GAM 7.52.3) only (one tenant, one offboarding).
 - GAM's `check serviceaccount` output is shown as GAM prints it; GAMUT does not compute a list of missing scopes.

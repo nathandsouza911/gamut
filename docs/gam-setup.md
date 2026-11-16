@@ -52,4 +52,4 @@ After a successful upload, remove the credential files from your own computer, o
 ## Known limits
 
 - A service account alone cannot run every offboarding step in this setup: directory actions and data transfers use the admin OAuth client, the Gmail auto-reply uses the service account ([decisions.md](decisions.md), "GAM7 configuration files and GAMCFGDIR"). Google's delegated-admin service accounts and keyless signing may reduce this in Milestone 2.
-- Whether the Gmail auto-reply works for a suspended account is unconfirmed; GAMUT runs it before the suspend step for that reason.
+- Gmail accepts the auto-reply setting on a suspended account (checked on a live test domain); GAMUT still sets it before the suspend step. Whether replies are sent for mail to a suspended account was not tested.
