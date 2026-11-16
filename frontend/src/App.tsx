@@ -4,6 +4,7 @@ import { api, type Me, type Tenant } from "./api";
 import Footer from "./components/Footer";
 import TenantSwitcher from "./components/TenantSwitcher";
 import AuditLog from "./pages/AuditLog";
+import Dashboard from "./pages/Dashboard";
 import JobDetail from "./pages/JobDetail";
 import Jobs from "./pages/Jobs";
 import OffboardForm from "./pages/OffboardForm";
@@ -141,6 +142,7 @@ export default function App() {
       );
     }
     if (!tenant) return <p>You do not have access to any tenant yet.</p>;
+    if (page === "dashboard") return <Dashboard key={tenant.id} tenant={tenant} />;
     if (page === "setup") {
       return (
         <TenantSetup
@@ -183,6 +185,7 @@ export default function App() {
         {me ? (
           <>
             <nav>
+              {activeId ? <a href={`#/t/${activeId}/dashboard`}>Dashboard</a> : null}
               <a href={activeId ? `#/t/${activeId}` : "#/"}>Offboard</a>
               <a href={activeId ? `#/t/${activeId}/jobs` : "#/jobs"}>Jobs</a>
               <a href={activeId ? `#/t/${activeId}/audit` : "#/audit"}>Audit log</a>

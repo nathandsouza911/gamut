@@ -81,6 +81,10 @@ Login (10 per minute) is limited per client address, taken from `X-Forwarded-For
 - Confirmation: offboarding needs a preview and a signed, 10-minute token; account deletion is scheduled and needs a second confirmation. The scheduled deletion deletes the Google account by its immutable id, and only while that account still has the offboarded address and is suspended, so a reactivated account or an address reused by someone else is never deleted. One unfinished offboarding per user and tenant; the tenant's own admin account cannot be offboarded.
 - No credential material in logs, test output or API responses; stored GAM output is capped and scrubbed.
 
+## Service-account-only credentials (DASA)
+
+In DASA mode the service account key is the only Google secret GAMUT holds. Its power is bounded by the Admin roles assigned to the service account (never super admin) plus one Gmail settings scope. If the key is compromised, delete it in the Cloud console and unassign the roles; no other Google credential needs to be rotated.
+
 ## Known limits (Milestone 1)
 
 - One web process; rate limits are in memory.
