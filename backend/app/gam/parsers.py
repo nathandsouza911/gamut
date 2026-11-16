@@ -43,6 +43,9 @@ def parse_transfers_csv(stdout: str) -> list[TransferStatus]:
         return []
     reader = csv.DictReader(io.StringIO(text))
     needed = {"id", "oldOwnerUserEmail", "newOwnerUserEmail", "overallTransferStatusCode"}
+    # With no transfers GAM prints only an `id` header line (seen on a live domain).
+    if reader.fieldnames == ["id"] and len(text.splitlines()) == 1:
+        return []
     if not needed <= set(reader.fieldnames or []):
         raise ValueError("unexpected output from print datatransfers")
     seen: dict[str, TransferStatus] = {}

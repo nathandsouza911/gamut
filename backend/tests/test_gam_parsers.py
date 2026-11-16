@@ -32,8 +32,13 @@ def test_parse_transfers_csv_one_entry_per_transfer_in_order():
 def test_parse_transfers_csv_empty_and_errors():
     assert parse_transfers_csv("") == []
     assert parse_transfers_csv(HEADER) == []
+    # No transfers: GAM 7.52.3 prints only the `id` column header (seen on a live domain).
+    assert parse_transfers_csv("id\n") == []
+    assert parse_transfers_csv("id") == []
     with pytest.raises(ValueError):
         parse_transfers_csv("ERROR: No Client Access allowed\n")
+    with pytest.raises(ValueError):  # rows without the needed columns are still refused
+        parse_transfers_csv("id\n111\n")
 
 
 def test_list_transfers_through_runner(fake_gam, tmp_path):
