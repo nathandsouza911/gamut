@@ -20,6 +20,7 @@ from app.crypto.envelope import SealedBundle, open_bundle
 from app.jobs.execute import run_steps
 from app.models import (
     AuditEvent,
+    AuthMode,
     Job,
     JobStatus,
     JobStep,
@@ -470,3 +471,96 @@ def test_run_steps_works_without_a_default_tempdir(
     for call in fake_gam.calls():
         assert call["env"]["TMPDIR"] == call["env"]["GAMCFGDIR"]
     assert os.listdir(job_dir) == []
+
+
+# --- DASA mode -----------------------------------------------------------------------
+
+DASA_SERVICE = {
+    "type": "service_account",
+    "client_email": "sa@p.iam.gserviceaccount.com",
+    "client_id": "1234",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+}
+
+
+def _dasa_files(**changes: object) -> dict[str, bytes]:
+    doc = {**DASA_SERVICE, **changes}
+    body = {k: v for k, v in doc.items() if v is not None}
+    return {"oauth2service.json": json.dumps(body).encode()}
+
+
+@pytest.fixture
+def dasa_tenant(
+    make_tenant: Callable[..., Tenant], owner_client: TestClient, app_session: Session
+) -> Tenant:
+    # Created after owner_client, which has already committed; commit again for the API.
+    tenant = make_tenant(
+        name="Dasa Co", primary_domain="dasa.test", status=TenantStatus.pending,
+        admin_email="admin@dasa.test", auth_mode=AuthMode.dasa, customer_id="C04jm7qkb",
+    )
+    app_session.commit()
+    return tenant
+
+
+def test_dasa_upload_rules(
+    owner_client: TestClient, dasa_tenant: Tenant, app_session: Session
+) -> None:
+    r = _upload(owner_client, dasa_tenant, _dasa_files())
+    assert r.status_code == 200, r.text
+    got = owner_client.get(f"/api/tenants/{dasa_tenant.id}")
+    assert got.json()["sa_client_email"] == "sa@p.iam.gserviceaccount.com"
+    assert got.json()["sa_client_id"] == "1234"
+    assert got.json()["auth_mode"] == "dasa"
+    assert "PRIVATE KEY" not in r.text and "PRIVATE KEY" not in got.text
+    assert "PRIVATE KEY" not in owner_client.get("/api/tenants").text
+
+    for extra, needle in (
+        ({"oauth2.txt": OAUTH2.encode()}, "oauth2.txt"),
+        ({"client_secrets.json": b"{}"}, "client_secrets.json"),
+        ({"gam.cfg": b"[DEFAULT]\n"}, "gam.cfg"),
+    ):
+        bad = _upload(owner_client, dasa_tenant, {**_dasa_files(), **extra})
+        assert bad.status_code == 422, bad.text
+        assert needle in bad.text
+
+    for changes in ({"client_email": None}, {"type": "authorized_user"}, {"key_type": "signjwt"}):
+        bad = _upload(owner_client, dasa_tenant, _dasa_files(**changes))
+        assert bad.status_code == 422, bad.text
+        assert "PRIVATE KEY" not in bad.text and "1234" not in bad.text
+
+
+def test_oauth_mode_unchanged(
+    owner_client: TestClient, tenant: Tenant, app_session: Session
+) -> None:
+    files = {
+        "oauth2.txt": OAUTH2.encode(),
+        "oauth2service.json": json.dumps(DASA_SERVICE).encode(),
+    }
+    assert _upload(owner_client, tenant, files).status_code == 200
+    got = owner_client.get(f"/api/tenants/{tenant.id}").json()
+    assert got["auth_mode"] == "oauth"
+    assert got["sa_client_email"] == "sa@p.iam.gserviceaccount.com"
+    assert got["sa_client_id"] == "1234"
+
+
+def test_dasa_tenant_requires_valid_customer_id(
+    owner_client: TestClient, app_session: Session
+) -> None:
+    body = {"name": "D", "primary_domain": "d.test", "auth_mode": "dasa"}
+    bad = owner_client.post("/api/tenants", json={**body, "customer_id": "my_customer"})
+    assert bad.status_code == 422
+    ok = owner_client.post("/api/tenants", json={**body, "customer_id": " C04jm7qkb "})
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["auth_mode"] == "dasa" and ok.json()["customer_id"] == "C04jm7qkb"
+    tenant_id = ok.json()["id"]
+    r = owner_client.patch(f"/api/tenants/{tenant_id}", json={"customer_id": "C01abcdef"})
+    assert r.status_code == 200, r.text
+    assert r.json()["customer_id"] == "C01abcdef"
+    assert _events(app_session, "tenant.update")[0].details == {"customer_id": "C01abcdef"}
+    assert owner_client.patch(
+        f"/api/tenants/{tenant_id}", json={"customer_id": "nope"}
+    ).status_code == 422
+    # A dasa tenant may be created without a customer id; auth_mode is not patchable.
+    none = owner_client.post("/api/tenants", json={"name": "E", "primary_domain": "e.test",
+                                                   "auth_mode": "dasa"})
+    assert none.status_code == 201 and none.json()["customer_id"] is None

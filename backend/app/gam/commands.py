@@ -6,10 +6,10 @@ docs/decisions.md. User input fills fixed positions only and never becomes part 
 that is split later.
 """
 
-from app.gam.validate import DomainName, Email, FreeText, GoogleUserId
+from app.gam.validate import CustomerId, DomainName, Email, FreeText, GoogleUserId
 
 __all__ = [
-    "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
+    "CustomerId", "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
     "create_drive_transfer",
     "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
     "info_user_by_id", "list_transfers", "print_user_groups",

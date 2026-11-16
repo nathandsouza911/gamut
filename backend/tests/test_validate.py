@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import pytest
 
-from app.gam.validate import Email, FreeText, assert_in_tenant
+from app.gam.validate import CustomerId, Email, FreeText, assert_in_tenant
 
 
 def test_email_validation():
@@ -51,3 +51,12 @@ def test_free_text_is_single_argument_and_file_forms_rejected():
         FreeText("x\x00y")
     ok = "Out of office; file a ticket instead"
     assert FreeText(ok) == ok
+
+
+def test_customer_id_validation():
+    assert CustomerId(" C04jm7qkb ") == "C04jm7qkb"
+    for bad in ["my_customer", "c04jm7qkb", "C04", "C04jm7qkb;rm", ""]:
+        with pytest.raises(ValueError):
+            CustomerId(bad)
+    with pytest.raises(TypeError):
+        CustomerId(123)  # type: ignore[arg-type]

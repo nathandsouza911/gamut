@@ -36,6 +36,14 @@ class TenantStatus(enum.StrEnum):
     disabled = "disabled"
 
 
+class AuthMode(enum.StrEnum):
+    """How GAMUT reaches the tenant: an admin OAuth token plus a service account (oauth),
+    or only a service account holding Admin console roles (dasa)."""
+
+    oauth = "oauth"
+    dasa = "dasa"
+
+
 class Role(enum.StrEnum):
     """`owner` lives on users.is_owner; memberships hold admin, technician or auditor."""
 
@@ -142,6 +150,13 @@ class Tenant(Base):
         nullable=False,
         server_default=TenantStatus.pending.value,
     )
+    auth_mode: Mapped[AuthMode] = mapped_column(
+        _pg_enum(AuthMode, "auth_mode"),
+        nullable=False,
+        server_default=AuthMode.oauth.value,
+    )
+    # Google's customer id (for example C04jm7qkb); required by GAM in dasa mode.
+    customer_id: Mapped[str | None] = mapped_column(Text)
     last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_health_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _created_at()
@@ -160,6 +175,9 @@ class TenantCredential(Base):
     wrapped_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     key_version: Mapped[int] = mapped_column(Integer, nullable=False)
     file_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    # Non-secret identifiers read from oauth2service.json, shown to guide setup.
+    sa_client_email: Mapped[str | None] = mapped_column(Text)
+    sa_client_id: Mapped[str | None] = mapped_column(Text)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )

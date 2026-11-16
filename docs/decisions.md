@@ -199,3 +199,32 @@ Found and fixed on the way:
 
 Not checked: whether Gmail actually sends the auto-reply for mail to a suspended account (the setting is accepted; delivery to suspended users was not tested), and the scheduled deletion itself on the live domain (it ran only against the fake GAM).
 
+
+## 2026-11-16: Milestone 2 — delegated admin service account
+
+Tenants have an `auth_mode` (migration `0004_dasa`): `oauth` (Milestone 1, the default for the API and for existing rows) or `dasa`. In `dasa` mode GAM runs with `enable_dasa`: only `oauth2service.json` is uploaded and the service account itself holds Admin console roles, so no admin refresh token (`oauth2.txt`) is stored. `oauth2.txt`, `client_secrets.json` and `gam.cfg` are refused for a `dasa` tenant. `auth_mode` cannot be changed after the tenant is created.
+
+- `tenants.customer_id` (nullable): Google's customer id, validated `^C[0-9a-z]{6,12}$` (`CustomerId`; `my_customer` is refused because GAM's DASA mode needs the real id). A `dasa` tenant may be created without it and given it later with `PATCH` (audited as `tenant.update`); the health check refuses until it is set.
+- On upload GAMUT stores the service account's non-secret `client_email` and `client_id` in clear (`tenant_credentials.sa_client_email`, `sa_client_id`) so the setup guide can show them. `private_key_id` and the key are not returned. In `dasa` mode the key file must have `type` `service_account`, `client_email`, `client_id` and `private_key`, and `key_type` must be absent or `default` (no signjwt or yubikey).
+
+Live result (GAM 7.52.3, test tenant) with only `oauth2service.json`, and these roles on the service account: built-in User Management Admin, built-in Groups Admin, and a custom role with the Data Transfer privilege, plus the existing delegation of `gmail.settings.basic`:
+
+| Command (as GAMUT builds it) | Result |
+|---|---|
+| `user X print groups` | works |
+| `update user X password random` | works |
+| `user X signout` | works |
+| `user X deprovision` | works |
+| `user X vacation on subject … message …` (delegation) | works |
+| `update user X suspended on` | works |
+| `user X delete groups` | works |
+| `create datatransfer X gdrive M` / `print datatransfers …` | works (403 until the Data Transfer role was added) |
+| `info user uid:N quick formatjson` / `delete user uid:N` | works |
+| `info user <admin_email> quick formatjson` | works (returns `customerId`) |
+| `user <admin_email> check serviceaccount` | works |
+| `print transferapps` | works (403 without Data Transfer) |
+| `info domain <domain>`, `info customer`, `print domains` | 403 (need domain/customer privileges GAMUT does not otherwise need) |
+
+Role changes took 30 to 75 seconds to take effect.
+
+**Keyless signing (SignJWT, `key_type: signjwt`) is deferred.** The GAMUT host would need its own Google-trusted identity (a GCE attached service account, or Workload Identity Federation from AWS or an OIDC issuer), which a typical self-hosted Docker box does not have, so it would move the long-lived secret rather than remove it, and each tenant's Google Cloud project would also have to trust GAMUT's identity. Revisit later, most likely for GCP-hosted installs.

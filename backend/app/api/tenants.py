@@ -4,7 +4,7 @@
 GET    /api/tenants                               tenants the user can see (owners: all)
 POST   /api/tenants                               (owner) add a tenant, status pending
 GET    /api/tenants/{tenant_id}                   any role on the tenant
-PATCH  /api/tenants/{tenant_id}                   (owner) set admin_email and/or domains
+PATCH  /api/tenants/{tenant_id}                   (owner) set admin_email, domains, customer_id
 DELETE /api/tenants/{tenant_id}                   (owner) delete it; audit events stay
 GET    /api/tenants/{tenant_id}/members           (owner or tenant admin) list members
 POST   /api/tenants/{tenant_id}/members           (owner or tenant admin) set a user's role
@@ -44,9 +44,9 @@ from app.auth.deps import current_user, require_owner, require_tenant_role
 from app.auth.ratelimit import JOB_CREATE_LIMIT, rate_limit
 from app.auth.tenant_guard import TenantScopedRoute
 from app.db import session_scope
-from app.gam.validate import Email, assert_in_tenant
+from app.gam.validate import CustomerId, Email, assert_in_tenant
 from app.jobs.queue import create_job, plan_job
-from app.models import Job, JobStatus, Membership, Role, Tenant, TenantStatus, User
+from app.models import AuthMode, Job, JobStatus, Membership, Role, Tenant, TenantStatus, User
 from app.tenants.service import (
     ALLOWED_FILES,
     MAX_FILE_BYTES,
@@ -63,6 +63,10 @@ _ACTIVE_JOB = (JobStatus.queued, JobStatus.running, JobStatus.waiting)
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
+def _customer_id(value: str | None) -> str | None:
+    return None if value is None else str(CustomerId(value))
+
+
 def _domain(value: str) -> str:
     domain = value.strip().lower()
     if not DOMAIN_RE.fullmatch(domain):
@@ -75,6 +79,15 @@ class TenantCreate(BaseModel):
     primary_domain: str = Field(max_length=253)
     domains: list[str] = Field(default_factory=list, max_length=100)
     admin_email: str | None = Field(default=None, max_length=320)
+    # oauth: Milestone 1 (admin token + service account). dasa: service account only.
+    auth_mode: Literal["oauth", "dasa"] = "oauth"
+    # Google's customer id; dasa tenants need it (it may be set later with PATCH).
+    customer_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("customer_id")
+    @classmethod
+    def _customer(cls, value: str | None) -> str | None:
+        return _customer_id(value)
 
     @field_validator("name")
     @classmethod
@@ -104,6 +117,12 @@ class TenantUpdate(BaseModel):
     admin_email: str | None = Field(default=None, max_length=320)
     # Replaces the extra domains; the primary domain is always kept.
     domains: list[str] | None = Field(default=None, max_length=100)
+    customer_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("customer_id")
+    @classmethod
+    def _customer(cls, value: str | None) -> str | None:
+        return _customer_id(value)
 
     @field_validator("domains")
     @classmethod
@@ -122,6 +141,8 @@ class TenantOut(BaseModel):
     primary_domain: str
     domains: list[str]
     admin_email: str | None
+    auth_mode: AuthMode
+    customer_id: str | None
     status: TenantStatus
     last_health_check_at: datetime | None
     last_health_message: str | None
@@ -130,6 +151,9 @@ class TenantOut(BaseModel):
     has_credentials: bool
     credential_files: list[str]  # names only; contents are never returned
     credentials_uploaded_at: datetime | None
+    # Non-secret identifiers of the uploaded service account key.
+    sa_client_email: str | None
+    sa_client_id: str | None
 
 
 class MemberSet(BaseModel):
@@ -152,7 +176,7 @@ class JobCreated(BaseModel):
     job_id: uuid.UUID
 
 
-Credentials = tuple[list[str], datetime] | None
+Credentials = tuple[list[str], datetime, str | None, str | None] | None
 
 
 def _out(tenant: Tenant, role: Role, creds: Credentials = None) -> TenantOut:
@@ -162,6 +186,8 @@ def _out(tenant: Tenant, role: Role, creds: Credentials = None) -> TenantOut:
         primary_domain=tenant.primary_domain,
         domains=list(tenant.domains),
         admin_email=tenant.admin_email,
+        auth_mode=tenant.auth_mode,
+        customer_id=tenant.customer_id,
         status=tenant.status,
         last_health_check_at=tenant.last_health_check_at,
         last_health_message=tenant.last_health_message,
@@ -170,6 +196,8 @@ def _out(tenant: Tenant, role: Role, creds: Credentials = None) -> TenantOut:
         has_credentials=creds is not None,
         credential_files=list(creds[0]) if creds else [],
         credentials_uploaded_at=creds[1] if creds else None,
+        sa_client_email=creds[2] if creds else None,
+        sa_client_id=creds[3] if creds else None,
     )
 
 
@@ -214,6 +242,8 @@ def create_tenant(body: TenantCreate, owner: Annotated[User, Depends(require_own
                 primary_domain=body.primary_domain,
                 domains=domains,
                 admin_email=body.admin_email,
+                auth_mode=AuthMode(body.auth_mode),
+                customer_id=body.customer_id,
                 status=TenantStatus.pending,
             )
             db.add(tenant)
@@ -222,7 +252,10 @@ def create_tenant(body: TenantCreate, owner: Annotated[User, Depends(require_own
             append_event(
                 db, actor=owner.email, tenant_id=tenant.id, action="tenant.create",
                 target=tenant.name,
-                details={"primary_domain": tenant.primary_domain, "domains": domains},
+                details={
+                    "primary_domain": tenant.primary_domain, "domains": domains,
+                    "auth_mode": tenant.auth_mode.value, "customer_id": tenant.customer_id,
+                },
             )
             return _out(tenant, Role.owner)
     except IntegrityError:
@@ -253,6 +286,9 @@ def update_tenant(
         if "admin_email" in body.model_fields_set:
             tenant.admin_email = body.admin_email
             changes["admin_email"] = body.admin_email
+        if "customer_id" in body.model_fields_set:
+            tenant.customer_id = body.customer_id
+            changes["customer_id"] = body.customer_id
         if tenant.admin_email:
             try:
                 assert_in_tenant(Email(tenant.admin_email), tenant.domains)
