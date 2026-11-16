@@ -27,6 +27,12 @@ def test_builders_match_wiki():
     # reads user counts from the Reports API (a scope GAMUT does not ask for).
     assert c.info_domain(DomainName("x.com")) == ["info", "domain", "x.com", "formatjson"]
     assert c.check_service_account(E) == ["user", "a@x.com", "check", "serviceaccount"]
+    # gam7 7.52.3 checkServiceAccount: `scope|scopes <list>` tests only those scopes.
+    scope = "https://www.googleapis.com/auth/gmail.settings.basic"
+    assert c.check_service_account(E, scope) == [
+        "user", "a@x.com", "check", "serviceaccount", "scope", scope]
+    with pytest.raises(ValueError):
+        c.check_service_account(E, "https://mail.google.com/")
 
 
 def test_builders_reject_plain_strings():

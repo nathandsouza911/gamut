@@ -32,7 +32,7 @@ from app.models import (
     TenantStatus,
     User,
 )
-from app.tenants.service import MAX_FILE_BYTES
+from app.tenants.service import MAX_FILE_BYTES, with_gmail_scope_record
 
 Login = Callable[[TestClient, User], str]
 Keys = tuple[X25519PrivateKey, str]
@@ -555,6 +555,46 @@ def test_oauth_mode_unchanged(
     assert got["sa_client_id"] == "1234"
 
 
+GMAIL_BASIC = "https://www.googleapis.com/auth/gmail.settings.basic"
+
+
+def _stored_files(session: Session, tenant: Tenant, keys: Keys) -> dict[str, bytes]:
+    session.expire_all()
+    row = session.get(TenantCredential, tenant.id)
+    assert row is not None
+    sealed = SealedBundle(row.ciphertext, row.nonce, row.wrapped_key, row.key_version)
+    return open_bundle(sealed, keys[0], associated_data=tenant.id.bytes)
+
+
+def test_dasa_upload_records_gmail_scope(
+    owner_client: TestClient, dasa_tenant: Tenant, app_session: Session, credential_keys: Keys
+) -> None:
+    assert _upload(owner_client, dasa_tenant, _dasa_files()).status_code == 200
+    stored = json.loads(_stored_files(app_session, dasa_tenant, credential_keys)[
+        "oauth2service.json"])
+    assert stored == {**DASA_SERVICE, "us_scopes": {"gmail": [GMAIL_BASIC]}}
+
+    other = {"gmail": ["https://mail.google.com/"], "drive3": ["https://x"]}
+    assert _upload(owner_client, dasa_tenant, _dasa_files(us_scopes=other)).status_code == 200
+    stored = json.loads(_stored_files(app_session, dasa_tenant, credential_keys)[
+        "oauth2service.json"])
+    assert stored["us_scopes"] == {"gmail": [GMAIL_BASIC]}
+    assert stored["client_email"] == DASA_SERVICE["client_email"]
+
+
+def test_oauth_upload_keeps_service_key_unchanged(
+    owner_client: TestClient, tenant: Tenant, app_session: Session, credential_keys: Keys
+) -> None:
+    assert _upload(owner_client, tenant).status_code == 200
+    assert _stored_files(app_session, tenant, credential_keys) == GOOD_FILES
+
+
+def test_gmail_scope_record_keeps_other_fields() -> None:
+    doc = {**DASA_SERVICE, "us_scopes": {"admin": ["x"]}, "extra": [1, {"a": None}]}
+    out = json.loads(with_gmail_scope_record(json.dumps(doc).encode()))
+    assert out == {**doc, "us_scopes": {"gmail": [GMAIL_BASIC]}}
+
+
 DASA_ADMIN = "admin@dasa.test"
 DASA_USER_JSON = '{"primaryEmail": "admin@dasa.test", "customerId": "%s"}'
 
@@ -592,7 +632,8 @@ def test_dasa_health_plan(
     steps = _steps(app_session, job)
     assert [(s.key, s.args) for s in steps] == [
         ("directory_role", ["info", "user", DASA_ADMIN, "quick", "formatjson"]),
-        ("gmail_delegation", ["user", DASA_ADMIN, "check", "serviceaccount"]),
+        ("gmail_delegation", ["user", DASA_ADMIN, "check", "serviceaccount",
+                              "scope", GMAIL_BASIC]),
         ("data_transfer", ["print", "transferapps"]),
     ]
     assert [s.title for s in steps] == [
@@ -691,6 +732,26 @@ def test_dasa_data_transfer_403_hint(
                                          StepStatus.failed]
     assert ("Assign a custom Admin role with the Data Transfer privilege to the service "
             "account; changes can take a few minutes.") in (tenant.last_health_message or "")
+
+
+def test_oauth_data_transfer_hint_names_the_token(
+    owner_client: TestClient, stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    fake_gam.scenario([
+        {"match": ["info", "domain"], "stdout": '{"customerId": "C01"}'},
+        {"match": ["print", "transferapps"], "exit": 61,
+         "stderr": "Not Authorized to access this resource/api"},
+    ])
+    job = _health_job(owner_client, stored, app_session)
+    run_steps(app_session, job, credential_keys[0])
+    app_session.expire_all()
+    tenant = app_session.get(Tenant, stored.id)
+    assert tenant is not None
+    message = tenant.last_health_message or ""
+    assert "admin's OAuth token needs the Data Transfer scope" in message
+    assert "admin.datatransfer" in message and "oauth create" in message
+    assert "to the service account" not in message
 
 
 def test_setup_section_map() -> None:

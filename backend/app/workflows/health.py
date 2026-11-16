@@ -12,7 +12,8 @@ OAuth tenants (all read-only):
 DASA tenants (delegated admin service account; no oauth2.txt):
 1. `info user <admin_email> quick formatjson`: the service account can read the directory
    (it needs Admin roles) and the account belongs to the tenant's customer id.
-2. `user <admin_email> check serviceaccount`: Gmail delegation (gmail.settings.basic).
+2. `user <admin_email> check serviceaccount scope <gmail.settings.basic>`: Gmail
+   delegation of the one scope GAMUT uses (the stored key's `us_scopes` names only it).
 3. `print transferapps`: the Data Transfer role.
 
 GAM gives no machine-readable list of missing scopes (`check serviceaccount` has no CSV
@@ -39,7 +40,11 @@ from app.gam.commands import (
 from app.gam.parsers import parse_user_info_json
 from app.gam.validate import assert_in_tenant
 from app.models import AuthMode, Job, JobStatus, JobStep, StepStatus, Tenant
-from app.tenants.service import HEALTH_MESSAGE_MAX, apply_health_result
+from app.tenants.service import (
+    GMAIL_SETTINGS_BASIC_SCOPE,
+    HEALTH_MESSAGE_MAX,
+    apply_health_result,
+)
 from app.workflows.base import (
     StepContext,
     StepOutcome,
@@ -71,6 +76,12 @@ ROLES_HINT = "Assign the Admin roles to the service account; changes can take a 
 DATA_TRANSFER_HINT = (
     "Assign a custom Admin role with the Data Transfer privilege to the service account; "
     "changes can take a few minutes."
+)
+OAUTH_DATA_TRANSFER_HINT = (
+    "The admin's OAuth token needs the Data Transfer scope "
+    "(https://www.googleapis.com/auth/admin.datatransfer) and the admin needs the Data "
+    "Transfer privilege. Re-run GAM's `oauth create` with that scope selected and upload "
+    "the new oauth2.txt."
 )
 
 
@@ -109,7 +120,7 @@ class HealthCheck:
                 StepSpec(
                     key="gmail_delegation",
                     title="Gmail delegation (gmail.settings.basic)",
-                    args=check_service_account(admin),
+                    args=check_service_account(admin, GMAIL_SETTINGS_BASIC_SCOPE),
                 ),
                 transfer,
             ]
@@ -149,7 +160,8 @@ class HealthCheck:
         if not failed:
             message = "Health check did not complete"
         else:
-            message = "\n\n".join(_failure_block(step) for step in failed)
+            dasa = tenant.auth_mode == AuthMode.dasa
+            message = "\n\n".join(_failure_block(step, dasa=dasa) for step in failed)
         apply_health_result(session, tenant, ok=False, message=message[:HEALTH_MESSAGE_MAX])
 
 
@@ -176,7 +188,7 @@ def _check_customer(outcome: StepOutcome, expected: str) -> StepOutcome:
     return outcome
 
 
-def _failure_block(step: JobStep) -> str:
+def _failure_block(step: JobStep, *, dasa: bool) -> str:
     output = step.output or ""
     hint: str | None = None
     if step.key in ("check_service_account", "gmail_delegation") and (
@@ -186,7 +198,7 @@ def _failure_block(step: JobStep) -> str:
     elif step.key == "directory_role" and NOT_AUTHORIZED in output:
         hint = ROLES_HINT
     elif step.key == "data_transfer" and NOT_AUTHORIZED in output:
-        hint = DATA_TRANSFER_HINT
+        hint = DATA_TRANSFER_HINT if dasa else OAUTH_DATA_TRANSFER_HINT
     if step.exit_code is None or (step.exit_code == 0 and hint is None):
         head = f"{step.title}: failed"
     else:

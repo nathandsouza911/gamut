@@ -13,6 +13,9 @@ In dasa mode (delegated admin service account) only oauth2service.json is allowe
 gam.cfg is refused: its path settings (config_dir, oauth2_txt, cache_dir, ...) are
 absolute paths on the operator's machine and could point GAM outside the job directory.
 GAM writes a default gam.cfg into the job directory instead.
+
+In dasa mode the stored oauth2service.json gets GAM's `us_scopes` record set to the one
+Gmail scope GAMUT uses (see with_gmail_scope_record).
 """
 
 import json
@@ -33,6 +36,13 @@ OPTIONAL_FILES = ("client_secrets.json",)
 ALLOWED_FILES = REQUIRED_FILES + OPTIONAL_FILES
 MAX_FILE_BYTES = 256 * 1024
 HEALTH_MESSAGE_MAX = 4000
+
+# GAM 7.52.3 reads the service account's scopes per API from the key's "us_scopes"
+# object (gamlib/glapi.py OAUTH2SA_SCOPES; gam/__init__.py _getSvcAcctData). Without it
+# GAM uses its default scope set (for Gmail: mail.google.com, gmail.modify,
+# gmail.settings.basic, gmail.settings.sharing), which a DASA key is not delegated.
+GMAIL_SETTINGS_BASIC_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+DASA_SCOPE_RECORD: dict[str, list[str]] = {"gmail": [GMAIL_SETTINGS_BASIC_SCOPE]}
 
 
 class CredentialError(ValueError):
@@ -77,6 +87,19 @@ def _service_account_identity(parsed: dict[str, object], mode: AuthMode) -> Serv
         client_email=email if isinstance(email, str) else "",
         client_id=client_id if isinstance(client_id, str) else "",
     )
+
+
+def with_gmail_scope_record(content: bytes) -> bytes:
+    """The service account key with GAM's `us_scopes` set to exactly gmail.settings.basic.
+
+    Any existing `us_scopes` is replaced; every other field is kept. `content` must be a
+    JSON object (validate_files checks that first).
+    """
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise CredentialError("oauth2service.json is not a JSON object")
+    parsed["us_scopes"] = {api: list(scopes) for api, scopes in DASA_SCOPE_RECORD.items()}
+    return json.dumps(parsed, ensure_ascii=False, indent=2).encode()
 
 
 def validate_files(files: dict[str, bytes], mode: AuthMode) -> ServiceAccountIdentity:
@@ -124,6 +147,10 @@ def store_credentials(
     until a health check passes. A disabled tenant stays disabled.
     """
     identity = validate_files(files, tenant.auth_mode)
+    if tenant.auth_mode == AuthMode.dasa:
+        files = {
+            **files, "oauth2service.json": with_gmail_scope_record(files["oauth2service.json"])
+        }
     names = sorted(files)
     sealed = seal_bundle(files, public_key, associated_data=tenant.id.bytes)
     row = session.get(TenantCredential, tenant.id, with_for_update=True)

@@ -136,9 +136,23 @@ def info_domain(domain: DomainName) -> list[str]:
     return ["info", "domain", str(domain), "formatjson"]
 
 
-def check_service_account(e: Email) -> list[str]:
-    """Prints PASS/FAIL per scope; exit code 10 when scopes are not authorized."""
-    return ["user", _email(e), "check", "serviceaccount"]
+# Scopes `check_service_account` may test explicitly (constants, never user input).
+CHECKABLE_SCOPES = frozenset({"https://www.googleapis.com/auth/gmail.settings.basic"})
+
+
+def check_service_account(e: Email, scope: str | None = None) -> list[str]:
+    """Prints PASS/FAIL per scope; exit code 10 when scopes are not authorized.
+
+    Without `scope` GAM tests every scope in the key's `us_scopes` (or its default set).
+    With `scope` it tests only that one: gam7 7.52.3 checkServiceAccount accepts
+    `scope|scopes <list>` (comma or space separated) after `check serviceaccount`.
+    """
+    args = ["user", _email(e), "check", "serviceaccount"]
+    if scope is None:
+        return args
+    if scope not in CHECKABLE_SCOPES:
+        raise ValueError("unsupported scope")
+    return [*args, "scope", scope]
 
 
 def print_transfer_apps() -> list[str]:
