@@ -59,6 +59,9 @@ export default function Dashboard({ tenant }: { tenant: Tenant }) {
   const t = data.tenant;
   const isAdmin = t.role === "owner" || t.role === "admin";
   const canOperate = isAdmin || t.role === "technician";
+  // The guided setup is for service-account (dasa) tenants and only owners can change
+  // their setup; a tenant admin's setup page shows just the checks, already here.
+  const canSetUp = t.role === "owner" && t.auth_mode === "dasa";
   const { health, credentials } = data;
   const attention = data.failed_jobs.length + data.waiting_jobs.length;
 
@@ -69,7 +72,7 @@ export default function Dashboard({ tenant }: { tenant: Tenant }) {
           {t.name} <span className={`status ${t.status}`}>{t.status}</span>
         </h2>
         <ErrorText message={error} />
-        {t.status === "pending" ? (
+        {t.status === "pending" && canSetUp ? (
           <p>
             <a href={`#/t/${id}/setup`}>Continue setup</a>
           </p>
@@ -85,7 +88,7 @@ export default function Dashboard({ tenant }: { tenant: Tenant }) {
               {health.checks.map((c) => (
                 <li key={c.key}>
                   {c.title} <span className={`status ${c.status}`}>{c.status}</span>
-                  {c.status === "failed" ? (
+                  {c.status === "failed" && canSetUp ? (
                     <>
                       {" "}
                       <a href={`#/t/${id}/setup`}>Fix</a>

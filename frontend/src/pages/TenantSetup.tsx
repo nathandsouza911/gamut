@@ -12,6 +12,8 @@ interface Props {
 
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
 const ACTIVE = new Set(["queued", "running", "waiting"]);
+const STATUS_LABEL: Record<string, string> = { succeeded: "pass", failed: "fail" };
+const STATUS_CLASS: Record<string, string> = { succeeded: "active", failed: "degraded" };
 const POLL_MS = 2000;
 
 // Hash routing owns the URL fragment, so a "Fix in" link scrolls to the section itself.
@@ -71,18 +73,18 @@ function Details({ tenant, onChanged, onCreated }: Omit<Props, "isOwner">) {
     setBusy(true);
     setError(null);
     try {
+      // One request: the tenant is created with its domains or not at all.
       const created = await api.createTenant({
         name: name.trim(),
         primary_domain: domain.trim(),
+        domains: extra
+          .split(/[\s,]+/)
+          .map((d) => d.trim().toLowerCase())
+          .filter((d) => d !== ""),
         admin_email: adminEmail.trim() === "" ? null : adminEmail.trim(),
         auth_mode: "dasa",
         customer_id: customerId.trim(),
       });
-      const domains = extra
-        .split(/[\s,]+/)
-        .map((d) => d.trim().toLowerCase())
-        .filter((d) => d !== "");
-      if (domains.length > 0) await api.updateTenant(created.id, { domains });
       onChanged();
       onCreated(created.id);
     } catch (err) {
@@ -268,7 +270,8 @@ function Delegation({ tenant }: { tenant: Tenant }) {
   );
 }
 
-function Check({ tenant }: { tenant: Tenant }) {
+// "Fix in" buttons need the setup sections on the same page (owners of dasa tenants).
+function Check({ tenant, canFix }: { tenant: Tenant; canFix: boolean }) {
   const [dash, setDash] = useState<Dashboard | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [running, setRunning] = useState(false);
@@ -325,14 +328,14 @@ function Check({ tenant }: { tenant: Tenant }) {
         <ul className="plain">
           {checks.map((c) => {
             const output = job?.steps.find((s) => s.key === c.key)?.output;
-            const passed = c.status === "succeeded";
+            const failed = c.status === "failed";
             return (
               <li key={c.key}>
-                <span className={`status ${passed ? "active" : "degraded"}`}>
-                  {passed ? "pass" : "fail"}
+                <span className={`status ${STATUS_CLASS[c.status] ?? c.status}`}>
+                  {STATUS_LABEL[c.status] ?? c.status}
                 </span>{" "}
                 {c.title}
-                {!passed && c.section ? (
+                {failed && canFix && c.section ? (
                   <>
                     {" "}
                     <button type="button" onClick={() => scrollToSection(c.section as string)}>
@@ -364,7 +367,20 @@ export default function TenantSetup({ tenant, isOwner, onChanged, onCreated }: P
     return (
       <section>
         <h2>Checks for {tenant.name}</h2>
-        <Check tenant={tenant} />
+        <Check tenant={tenant} canFix={false} />
+      </section>
+    );
+  }
+  if (tenant && tenant.auth_mode !== "dasa") {
+    return (
+      <section>
+        <h2>Set up {tenant.name}</h2>
+        <p role="note">
+          This tenant uses an admin OAuth client (oauth2.txt). The guided setup is for
+          service-account tenants. Upload or replace its GAM files with the import form on the{" "}
+          <a href="#/tenants">Tenants page</a>.
+        </p>
+        <Check tenant={tenant} canFix={false} />
       </section>
     );
   }
@@ -377,7 +393,7 @@ export default function TenantSetup({ tenant, isOwner, onChanged, onCreated }: P
           <Credentials tenant={tenant} onChanged={onChanged} />
           <Roles tenant={tenant} />
           <Delegation tenant={tenant} />
-          <Check tenant={tenant} />
+          <Check tenant={tenant} canFix />
         </>
       ) : null}
     </section>

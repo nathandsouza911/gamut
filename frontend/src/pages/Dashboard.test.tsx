@@ -127,3 +127,14 @@ test("pending tenant shows Continue setup", async () => {
     expect(a?.getAttribute("href")).toBe("#/t/t1/setup");
   });
 });
+
+test("setup links only for owners of dasa tenants", async () => {
+  await show(data({}, { status: "pending" }));
+  expect(screen.getByRole("link", { name: "Fix" }).getAttribute("href")).toBe("#/t/t1/setup");
+  for (const t of [{ auth_mode: "oauth" as const }, { role: "admin" as const }, { role: "technician" as const }]) {
+    document.body.innerHTML = "";
+    await show(data({}, { status: "pending", ...t }));
+    expect(screen.queryByText("Continue setup")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Fix" })).toBeNull();
+  }
+});

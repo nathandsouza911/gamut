@@ -76,12 +76,19 @@ test("creates a dasa tenant and moves to credentials", async () => {
   fireEvent.change(screen.getByLabelText("Primary domain"), { target: { value: "example.com" } });
   fireEvent.change(screen.getByLabelText(/Admin email/), { target: { value: "admin@example.com" } });
   fireEvent.change(screen.getByLabelText(/Customer ID/), { target: { value: "  C04jm7qkb " } });
+  fireEvent.change(screen.getByLabelText(/Other domains/), { target: { value: "Example.org, b.example.com" } });
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Create tenant" }));
   });
   expect(api.createTenant).toHaveBeenCalledWith(
-    expect.objectContaining({ auth_mode: "dasa", customer_id: "C04jm7qkb", primary_domain: "example.com" }),
+    expect.objectContaining({
+      auth_mode: "dasa",
+      customer_id: "C04jm7qkb",
+      primary_domain: "example.com",
+      domains: ["example.org", "b.example.com"],
+    }),
   );
+  expect(api.updateTenant).not.toHaveBeenCalled(); // one request, no half-created tenant
   expect(onCreated).toHaveBeenCalledWith("new1");
 });
 
@@ -114,4 +121,34 @@ test("only owners see the setup for a new tenant", () => {
   render(<TenantSetup tenant={null} isOwner={false} onChanged={noop} onCreated={noop} />);
   expect(screen.queryByLabelText("Name")).toBeNull();
   expect(screen.getByText(/Only an owner/i)).toBeTruthy();
+});
+
+test("check list shows the real status; only failed checks get Fix", async () => {
+  const d = dashboard("failed");
+  d.health?.checks.push(
+    { key: "data_transfer", title: "Data Transfer role", status: "pending", exit_code: null, section: "roles" },
+  );
+  vi.mocked(api.dashboard).mockResolvedValue(d);
+  render(<TenantSetup tenant={tenant()} isOwner onChanged={noop} onCreated={noop} />);
+  await screen.findByText("Data Transfer role");
+  expect(screen.getByText("pending")).toBeTruthy();
+  expect(screen.getByText("pass")).toBeTruthy();
+  expect(screen.getAllByText("fail")).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: /Fix in/ })).toHaveLength(1);
+});
+
+test("tenant admins see checks without Fix buttons", async () => {
+  vi.mocked(api.dashboard).mockResolvedValue(dashboard("failed"));
+  render(<TenantSetup tenant={tenant({ role: "admin" })} isOwner={false} onChanged={noop} onCreated={noop} />);
+  await screen.findByText("Gmail delegation");
+  expect(screen.queryByRole("button", { name: /Fix in/ })).toBeNull();
+});
+
+test("an oauth tenant is pointed to the Tenants import form", async () => {
+  vi.mocked(api.dashboard).mockResolvedValue({ ...dashboard("failed"), health: null });
+  render(<TenantSetup tenant={tenant({ auth_mode: "oauth" })} isOwner onChanged={noop} onCreated={noop} />);
+  expect(screen.getByRole("link", { name: "Tenants page" }).getAttribute("href")).toBe("#/tenants");
+  expect(screen.queryByText("2. Service account key")).toBeNull();
+  expect(screen.queryByText("4. Domain-wide delegation")).toBeNull();
+  await screen.findByText("No check has run yet.");
 });

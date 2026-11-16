@@ -234,6 +234,7 @@ export const api = {
   createTenant: (b: {
     name: string;
     primary_domain: string;
+    domains?: string[]; // extra domains; the primary domain is always kept
     admin_email: string | null;
     auth_mode?: "oauth" | "dasa";
     customer_id?: string | null;
