@@ -58,6 +58,7 @@ export default function Dashboard({ tenant }: { tenant: Tenant }) {
 
   const t = data.tenant;
   const isAdmin = t.role === "owner" || t.role === "admin";
+  const canOperate = isAdmin || t.role === "technician";
   const { health, credentials } = data;
   const attention = data.failed_jobs.length + data.waiting_jobs.length;
 
@@ -154,8 +155,12 @@ export default function Dashboard({ tenant }: { tenant: Tenant }) {
             {data.scheduled.map((a) => (
               <li key={a.id}>
                 {a.action} {a.target ?? ""} at {when(a.run_at)}{" "}
-                {isAdmin ? (
-                  <button disabled={busy} onClick={() => void act(() => api.cancelScheduled(id, a.id))}>
+                {canOperate ? (
+                  <button
+                    aria-label={`Cancel ${a.action} ${a.target ?? ""} at ${when(a.run_at)}`}
+                    disabled={busy}
+                    onClick={() => void act(() => api.cancelScheduled(id, a.id))}
+                  >
                     Cancel
                   </button>
                 ) : null}

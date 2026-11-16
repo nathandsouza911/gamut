@@ -121,3 +121,22 @@ test("#/t/<id>/setup renders the setup page for that tenant", async () => {
   render(<App />);
   expect(await screen.findByRole("heading", { name: /Run the checks/i })).toBeTruthy();
 });
+
+test("#/t/<id>/dashboard renders the dashboard, and Dashboard is the first tenant nav link", async () => {
+  vi.mocked(api.dashboard).mockResolvedValue({
+    tenant: tenant("t2", "Second"),
+    health: null,
+    credentials: null,
+    failed_jobs: [],
+    waiting_jobs: [],
+    scheduled: [],
+    recent_jobs: [],
+  });
+  window.location.hash = "#/t/t2/dashboard";
+  render(<App />);
+  await waitFor(() => expect(api.dashboard).toHaveBeenCalledWith("t2"));
+  expect(await screen.findByText("Nothing needs attention.")).toBeTruthy();
+  const links = screen.getAllByRole("navigation")[0].querySelectorAll("a");
+  expect(links[0].textContent).toBe("Dashboard");
+  expect(links[0].getAttribute("href")).toBe("#/t/t2/dashboard");
+});

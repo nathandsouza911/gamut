@@ -99,14 +99,15 @@ test("needs attention lists failed and waiting jobs with links to job detail", a
   expect(w?.getAttribute("href")).toBe("#/t/t1/jobs/jw");
 });
 
-test("scheduled deletions can be cancelled by admins, not by technicians or auditors", async () => {
-  await show(data());
-  expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-  for (const role of ["technician", "auditor"] as const) {
+test("scheduled deletions can be cancelled by owners, admins and technicians, not auditors", async () => {
+  for (const role of ["owner", "admin", "technician"] as const) {
     document.body.innerHTML = "";
     await show(data({}, { role }));
-    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Cancel delete_user gone@example.com/ })).toBeTruthy();
   }
+  document.body.innerHTML = "";
+  await show(data({}, { role: "auditor" }));
+  expect(screen.queryByRole("button", { name: /^Cancel/ })).toBeNull();
 });
 
 test("run health check button hidden for technicians and auditors", async () => {
