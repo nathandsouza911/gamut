@@ -296,7 +296,7 @@ def test_health_check_activates_or_reports(
     assert tenant.last_health_check_at is not None
     steps = _steps(app_session, job)
     assert [s.args for s in steps] == [
-        ["info", "domain", "formatjson"], ["user", ADMIN, "check", "serviceaccount"]
+        ["info", "domain", "acme.test", "formatjson"], ["user", ADMIN, "check", "serviceaccount"]
     ]
     assert job.gam_version == "GAM 7.x.y - fake"
     calls = fake_gam.calls()

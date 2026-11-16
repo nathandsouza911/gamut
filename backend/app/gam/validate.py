@@ -36,6 +36,23 @@ class Email(str):
         return super().__new__(cls, cleaned)
 
 
+_DOMAIN_RE = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+
+
+class DomainName(str):
+    """A validated DNS domain name: trimmed (spaces only), lowercased, at least one dot."""
+
+    __slots__ = ()
+
+    def __new__(cls, value: str) -> Self:
+        if not isinstance(value, str):
+            raise TypeError("domain must be a string")
+        cleaned = value.strip(" ").lower()
+        if not _DOMAIN_RE.fullmatch(cleaned):
+            raise ValueError("not a valid domain name")
+        return super().__new__(cls, cleaned)
+
+
 _GOOGLE_ID_RE = re.compile(r"[0-9A-Za-z]{1,64}")
 
 

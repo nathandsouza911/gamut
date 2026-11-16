@@ -2,7 +2,8 @@
 """Health check: proves a tenant's GAM files work.
 
 Two read-only steps:
-1. `info domain formatjson`: a directory call with the admin OAuth token (oauth2.txt).
+1. `info domain <primary domain> formatjson`: a directory call with the admin OAuth token
+   (oauth2.txt; needs only the domain.readonly scope).
 2. `user <admin_email> check serviceaccount`: GAM's own test of the service account's
    domain-wide delegation scopes (oauth2service.json).
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.gam.commands import Email, check_service_account, info_domain
+from app.gam.commands import DomainName, Email, check_service_account, info_domain
 from app.gam.validate import assert_in_tenant
 from app.models import Job, JobStatus, JobStep, StepStatus, Tenant
 from app.tenants.service import HEALTH_MESSAGE_MAX, apply_health_result
@@ -48,7 +49,7 @@ class HealthCheck:
             StepSpec(
                 key="info_domain",
                 title="Read the domain with the admin token",
-                args=info_domain(),
+                args=info_domain(DomainName(tenant.primary_domain)),
             ),
             StepSpec(
                 key="check_service_account",

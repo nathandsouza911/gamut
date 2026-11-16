@@ -6,10 +6,11 @@ docs/decisions.md. User input fills fixed positions only and never becomes part 
 that is split later.
 """
 
-from app.gam.validate import Email, FreeText, GoogleUserId
+from app.gam.validate import DomainName, Email, FreeText, GoogleUserId
 
 __all__ = [
-    "Email", "FreeText", "GoogleUserId", "check_service_account", "create_drive_transfer",
+    "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
+    "create_drive_transfer",
     "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
     "info_user_by_id", "list_transfers", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
@@ -107,9 +108,14 @@ def delete_user_by_id(uid: GoogleUserId) -> list[str]:
     return ["delete", "user", _uid(uid)]
 
 
-def info_domain() -> list[str]:
-    """Read-only customer/domain lookup (one JSON object): the health check's directory call."""
-    return ["info", "domain", "formatjson"]
+def info_domain(domain: DomainName) -> list[str]:
+    """Read-only lookup of one domain (domains.get; one JSON object): the health check's
+    directory call. The domain must be named: without it GAM runs `info instance`, which
+    also reads user counts from the Reports API and fails without that scope (exit 15,
+    seen on a live domain)."""
+    if not isinstance(domain, DomainName):
+        raise TypeError("expected a validated DomainName")
+    return ["info", "domain", str(domain), "formatjson"]
 
 
 def check_service_account(e: Email) -> list[str]:

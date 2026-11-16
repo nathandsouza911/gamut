@@ -3,7 +3,7 @@ import pytest
 
 from app.gam import commands as c
 from app.gam.commands import Email, redact_argv
-from app.gam.validate import FreeText
+from app.gam.validate import DomainName, FreeText
 
 E = Email("a@x.com")
 
@@ -23,7 +23,9 @@ def test_builders_match_wiki():
         "print", "datatransfers", "olduser", "a@x.com", "newuser", "m@x.com"]
     assert c.info_user(E) == ["info", "user", "a@x.com", "quick", "formatjson"]
     assert c.delete_user(E) == ["delete", "user", "a@x.com"]
-    assert c.info_domain() == ["info", "domain", "formatjson"]
+    # Named domain: one domains.get call. Without it GAM runs `info instance`, which also
+    # reads user counts from the Reports API (a scope GAMUT does not ask for).
+    assert c.info_domain(DomainName("x.com")) == ["info", "domain", "x.com", "formatjson"]
     assert c.check_service_account(E) == ["user", "a@x.com", "check", "serviceaccount"]
 
 
@@ -34,6 +36,19 @@ def test_builders_reject_plain_strings():
         c.vacation_on(E, "s", "m")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         c.create_drive_transfer(E, "m@x.com")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        c.info_domain("x.com")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", ["", "x", "-x.com", "x..com", "formatjson",
+                                 "a@x.com", "x.com\n", "uid:x.com", "x.com formatjson"])
+def test_domain_name_rejects_bad_values(bad: str) -> None:
+    with pytest.raises(ValueError):
+        DomainName(bad)
+
+
+def test_domain_name_lowercases() -> None:
+    assert DomainName(" Acme.Test ") == "acme.test"
 
 
 def test_vacation_requires_message():
