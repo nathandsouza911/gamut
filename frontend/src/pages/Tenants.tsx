@@ -261,8 +261,13 @@ export default function Tenants({ tenants, isOwner, onChanged, onOpenJob }: Prop
     <section>
       <h2>Tenants</h2>
       {isOwner ? (
+        <p>
+          <a href="#/tenants/new">Add tenant (guided)</a>
+        </p>
+      ) : null}
+      {isOwner ? (
         <form className="card" onSubmit={(e) => void create(e)}>
-          <h3>Add a tenant</h3>
+          <h3>Advanced: import an existing GAM setup (OAuth)</h3>
           <label>
             Name
             <input value={name} onChange={(e) => setName(e.target.value)} required />
@@ -281,7 +286,7 @@ export default function Tenants({ tenants, isOwner, onChanged, onOpenJob }: Prop
           </label>
           <ErrorText message={error} />
           <button type="submit" disabled={busy}>
-            Add tenant
+            Import tenant
           </button>
         </form>
       ) : null}

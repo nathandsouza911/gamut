@@ -27,6 +27,12 @@ def test_builders_match_wiki():
     # reads user counts from the Reports API (a scope GAMUT does not ask for).
     assert c.info_domain(DomainName("x.com")) == ["info", "domain", "x.com", "formatjson"]
     assert c.check_service_account(E) == ["user", "a@x.com", "check", "serviceaccount"]
+    # gam7 7.52.3 checkServiceAccount: `scope|scopes <list>` tests only those scopes.
+    scope = "https://www.googleapis.com/auth/gmail.settings.basic"
+    assert c.check_service_account(E, scope) == [
+        "user", "a@x.com", "check", "serviceaccount", "scope", scope]
+    with pytest.raises(ValueError):
+        c.check_service_account(E, "https://mail.google.com/")
 
 
 def test_builders_reject_plain_strings():
@@ -81,3 +87,14 @@ def test_user_by_google_id_builders():
     for bad in ("", "12 3", "a@b.com", "uid:1", "1" * 65, "12\n"):
         with pytest.raises(ValueError):
             GoogleUserId(bad)
+
+
+def test_dasa_config_argv():
+    from app.gam.commands import CustomerId, DomainName, Email, dasa_config
+
+    assert dasa_config(
+        Email("admin@acme.test"), CustomerId("C04jm7qkb"), DomainName("acme.test")
+    ) == ["config", "enable_dasa", "true", "admin_email", "admin@acme.test",
+          "customer_id", "C04jm7qkb", "domain", "acme.test", "save"]
+    with pytest.raises(TypeError):
+        dasa_config("admin@acme.test", "C04jm7qkb", "acme.test")

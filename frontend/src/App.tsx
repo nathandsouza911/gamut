@@ -4,10 +4,12 @@ import { api, type Me, type Tenant } from "./api";
 import Footer from "./components/Footer";
 import TenantSwitcher from "./components/TenantSwitcher";
 import AuditLog from "./pages/AuditLog";
+import Dashboard from "./pages/Dashboard";
 import JobDetail from "./pages/JobDetail";
 import Jobs from "./pages/Jobs";
 import OffboardForm from "./pages/OffboardForm";
 import SignIn from "./pages/SignIn";
+import TenantSetup from "./pages/TenantSetup";
 import Tenants from "./pages/Tenants";
 import Users from "./pages/Users";
 import "./styles.css";
@@ -112,6 +114,16 @@ export default function App() {
     if (me === undefined) return <p>Loading...</p>;
     if (me === null) return <SignIn onSignedIn={signedIn} />;
     if (route.tenant === null && page === "users" && isOwner) return <Users meId={me.id} />;
+    if (route.tenant === null && page === "tenants" && arg === "new") {
+      return (
+        <TenantSetup
+          tenant={null}
+          isOwner={isOwner}
+          onChanged={() => void loadTenants()}
+          onCreated={(id) => go(`t/${id}/setup`)}
+        />
+      );
+    }
     if (route.tenant !== null && !routeKnown) {
       return tenantsLoaded ? (
         <p>You have no access to this tenant, or it does not exist.</p>
@@ -130,6 +142,18 @@ export default function App() {
       );
     }
     if (!tenant) return <p>You do not have access to any tenant yet.</p>;
+    if (page === "dashboard") return <Dashboard key={tenant.id} tenant={tenant} />;
+    if (page === "setup") {
+      return (
+        <TenantSetup
+          key={tenant.id}
+          tenant={tenant}
+          isOwner={isOwner}
+          onChanged={() => void loadTenants()}
+          onCreated={(id) => go(`t/${id}/setup`)}
+        />
+      );
+    }
     if (page === "jobs" && arg) {
       return (
         <JobDetail
@@ -161,6 +185,7 @@ export default function App() {
         {me ? (
           <>
             <nav>
+              {activeId ? <a href={`#/t/${activeId}/dashboard`}>Dashboard</a> : null}
               <a href={activeId ? `#/t/${activeId}` : "#/"}>Offboard</a>
               <a href={activeId ? `#/t/${activeId}/jobs` : "#/jobs"}>Jobs</a>
               <a href={activeId ? `#/t/${activeId}/audit` : "#/audit"}>Audit log</a>

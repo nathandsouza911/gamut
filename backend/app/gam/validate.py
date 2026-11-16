@@ -56,6 +56,28 @@ class DomainName(str):
 _GOOGLE_ID_RE = re.compile(r"[0-9A-Za-z]{1,64}")
 
 
+_CUSTOMER_ID_RE = re.compile(r"C[0-9a-z]{6,12}")
+
+
+class CustomerId(str):
+    """A Google Workspace customer id as shown in the Admin console (for example C04jm7qkb).
+
+    A capital C, then 6 to 12 lowercase letters or digits. `my_customer` is refused:
+    GAM's delegated admin service account mode needs the real id.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, value: str) -> Self:
+        if not isinstance(value, str):
+            raise TypeError("customer id must be a string")
+        # All surrounding whitespace (pasted ids often carry a tab or newline).
+        cleaned = value.strip()
+        if not _CUSTOMER_ID_RE.fullmatch(cleaned):
+            raise ValueError("not a valid customer id (for example C04jm7qkb)")
+        return super().__new__(cls, cleaned)
+
+
 class GoogleUserId(str):
     """A Google Workspace user's immutable id (the `id` of `info user ... formatjson`).
 

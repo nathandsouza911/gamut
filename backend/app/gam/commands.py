@@ -6,13 +6,13 @@ docs/decisions.md. User input fills fixed positions only and never becomes part 
 that is split later.
 """
 
-from app.gam.validate import DomainName, Email, FreeText, GoogleUserId
+from app.gam.validate import CustomerId, DomainName, Email, FreeText, GoogleUserId
 
 __all__ = [
-    "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
-    "create_drive_transfer",
+    "CustomerId", "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
+    "create_drive_transfer", "dasa_config",
     "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
-    "info_user_by_id", "list_transfers", "print_user_groups",
+    "info_user_by_id", "list_transfers", "print_transfer_apps", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
     "suspend_user", "vacation_on",
 ]
@@ -30,6 +30,24 @@ def _text(value: FreeText) -> str:
     if not isinstance(value, FreeText):
         raise TypeError("expected validated FreeText")
     return str(value)
+
+
+def _customer(value: CustomerId) -> str:
+    if not isinstance(value, CustomerId):
+        raise TypeError("expected a validated CustomerId")
+    return str(value)
+
+
+def _domain(value: DomainName) -> str:
+    if not isinstance(value, DomainName):
+        raise TypeError("expected a validated DomainName")
+    return str(value)
+
+
+def dasa_config(admin: Email, customer: CustomerId, domain: DomainName) -> list[str]:
+    """Write the DASA settings into gam.cfg (`config ... save`)."""
+    return ["config", "enable_dasa", "true", "admin_email", _email(admin),
+            "customer_id", _customer(customer), "domain", _domain(domain), "save"]
 
 
 def suspend_user(e: Email) -> list[str]:
@@ -118,9 +136,29 @@ def info_domain(domain: DomainName) -> list[str]:
     return ["info", "domain", str(domain), "formatjson"]
 
 
-def check_service_account(e: Email) -> list[str]:
-    """Prints PASS/FAIL per scope; exit code 10 when scopes are not authorized."""
-    return ["user", _email(e), "check", "serviceaccount"]
+# Scopes `check_service_account` may test explicitly (constants, never user input).
+CHECKABLE_SCOPES = frozenset({"https://www.googleapis.com/auth/gmail.settings.basic"})
+
+
+def check_service_account(e: Email, scope: str | None = None) -> list[str]:
+    """Prints PASS/FAIL per scope; exit code 10 when scopes are not authorized.
+
+    Without `scope` GAM tests every scope in the key's `us_scopes` (or its default set).
+    With `scope` it tests only that one: gam7 7.52.3 checkServiceAccount accepts
+    `scope|scopes <list>` (comma or space separated) after `check serviceaccount`.
+    """
+    args = ["user", _email(e), "check", "serviceaccount"]
+    if scope is None:
+        return args
+    if scope not in CHECKABLE_SCOPES:
+        raise ValueError("unsupported scope")
+    return [*args, "scope", scope]
+
+
+def print_transfer_apps() -> list[str]:
+    """Lists the apps that support data transfer; needs the Data Transfer admin privilege
+    (exit 61, "Not Authorized" without it)."""
+    return ["print", "transferapps"]
 
 
 def redact_argv(args: list[str]) -> list[str]:

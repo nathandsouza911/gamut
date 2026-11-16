@@ -20,6 +20,7 @@ from app.crypto.envelope import SealedBundle, open_bundle
 from app.jobs.execute import run_steps
 from app.models import (
     AuditEvent,
+    AuthMode,
     Job,
     JobStatus,
     JobStep,
@@ -31,7 +32,7 @@ from app.models import (
     TenantStatus,
     User,
 )
-from app.tenants.service import MAX_FILE_BYTES
+from app.tenants.service import MAX_FILE_BYTES, with_gmail_scope_record
 
 Login = Callable[[TestClient, User], str]
 Keys = tuple[X25519PrivateKey, str]
@@ -296,11 +297,13 @@ def test_health_check_activates_or_reports(
     assert tenant.last_health_check_at is not None
     steps = _steps(app_session, job)
     assert [s.args for s in steps] == [
-        ["info", "domain", "acme.test", "formatjson"], ["user", ADMIN, "check", "serviceaccount"]
+        ["info", "domain", "acme.test", "formatjson"], ["user", ADMIN, "check", "serviceaccount"],
+        ["print", "transferapps"],
     ]
     assert job.gam_version == "GAM 7.x.y - fake"
     calls = fake_gam.calls()
-    assert [c["argv"][:2] for c in calls] == [["info", "domain"], ["user", ADMIN]]
+    assert [c["argv"][:2] for c in calls] == [["info", "domain"], ["user", ADMIN],
+                                              ["print", "transferapps"]]
     for call in calls:  # credentials were materialized, in a per-job directory under job_dir
         assert {"oauth2.txt", "oauth2service.json"} <= set(call["env"]["files"])
         assert Path(call["env"]["GAMCFGDIR"]).parent == job_dir
@@ -308,8 +311,8 @@ def test_health_check_activates_or_reports(
 
     if check_exit == 0:
         assert job.status == JobStatus.succeeded
-        assert [s.status for s in steps] == [StepStatus.succeeded] * 2
-        assert [s.exit_code for s in steps] == [0, 0]
+        assert [s.status for s in steps] == [StepStatus.succeeded] * 3
+        assert [s.exit_code for s in steps] == [0, 0, 0]
         assert tenant.last_health_message == "Health check passed"
         events = _events(app_session, "job.step.succeeded")
         assert [e.details["argv"] for e in events] == [s.args for s in steps]
@@ -317,7 +320,8 @@ def test_health_check_activates_or_reports(
         assert _events(app_session, "job.succeeded")[0].tenant_id == tenant.id
     else:
         assert job.status == JobStatus.failed and job.finished_at is not None
-        assert [s.status for s in steps] == [StepStatus.succeeded, StepStatus.failed]
+        assert [s.status for s in steps] == [StepStatus.succeeded, StepStatus.failed,
+                                             StepStatus.succeeded]
         assert steps[1].exit_code == check_exit
         assert steps[1].output is not None and SCOPE_FAIL.strip() in steps[1].output
         assert tenant.last_health_message is not None
@@ -329,7 +333,7 @@ def test_health_check_activates_or_reports(
         assert failed.actor == "owner@example.com"
 
 
-def test_health_check_stops_at_first_failed_step(
+def test_health_check_runs_every_step_after_a_failure(
     owner_client: TestClient,
     stored: Tenant,
     app_session: Session,
@@ -341,9 +345,18 @@ def test_health_check_stops_at_first_failed_step(
     job = _health_job(owner_client, stored, app_session)
     run_steps(app_session, job, credential_keys[0])
     steps = _steps(app_session, job)
-    assert [s.status for s in steps] == [StepStatus.failed, StepStatus.pending]
-    assert len(fake_gam.calls()) == 1
+    assert [s.status for s in steps] == [StepStatus.failed, StepStatus.succeeded,
+                                         StepStatus.succeeded]
+    assert len(fake_gam.calls()) == 3
     assert job.status == JobStatus.failed
+
+
+def test_oauth_health_plan_adds_data_transfer(
+    owner_client: TestClient, stored: Tenant, app_session: Session
+) -> None:
+    job = _health_job(owner_client, stored, app_session)
+    assert [s.key for s in _steps(app_session, job)] == [
+        "info_domain", "check_service_account", "data_transfer"]
 
 
 def test_health_check_without_usable_credentials_fails_cleanly(
@@ -470,3 +483,304 @@ def test_run_steps_works_without_a_default_tempdir(
     for call in fake_gam.calls():
         assert call["env"]["TMPDIR"] == call["env"]["GAMCFGDIR"]
     assert os.listdir(job_dir) == []
+
+
+# --- DASA mode -----------------------------------------------------------------------
+
+DASA_SERVICE = {
+    "type": "service_account",
+    "client_email": "sa@p.iam.gserviceaccount.com",
+    "client_id": "1234",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+}
+
+
+def _dasa_files(**changes: object) -> dict[str, bytes]:
+    doc = {**DASA_SERVICE, **changes}
+    body = {k: v for k, v in doc.items() if v is not None}
+    return {"oauth2service.json": json.dumps(body).encode()}
+
+
+@pytest.fixture
+def dasa_tenant(
+    make_tenant: Callable[..., Tenant], owner_client: TestClient, app_session: Session
+) -> Tenant:
+    # Created after owner_client, which has already committed; commit again for the API.
+    tenant = make_tenant(
+        name="Dasa Co", primary_domain="dasa.test", status=TenantStatus.pending,
+        admin_email="admin@dasa.test", auth_mode=AuthMode.dasa, customer_id="C04jm7qkb",
+    )
+    app_session.commit()
+    return tenant
+
+
+def test_dasa_upload_rules(
+    owner_client: TestClient, dasa_tenant: Tenant, app_session: Session
+) -> None:
+    r = _upload(owner_client, dasa_tenant, _dasa_files())
+    assert r.status_code == 200, r.text
+    got = owner_client.get(f"/api/tenants/{dasa_tenant.id}")
+    assert got.json()["sa_client_email"] == "sa@p.iam.gserviceaccount.com"
+    assert got.json()["sa_client_id"] == "1234"
+    assert got.json()["auth_mode"] == "dasa"
+    assert "PRIVATE KEY" not in r.text and "PRIVATE KEY" not in got.text
+    assert "PRIVATE KEY" not in owner_client.get("/api/tenants").text
+
+    for extra, needle in (
+        ({"oauth2.txt": OAUTH2.encode()}, "oauth2.txt"),
+        ({"client_secrets.json": b"{}"}, "client_secrets.json"),
+        ({"gam.cfg": b"[DEFAULT]\n"}, "gam.cfg"),
+    ):
+        bad = _upload(owner_client, dasa_tenant, {**_dasa_files(), **extra})
+        assert bad.status_code == 422, bad.text
+        assert needle in bad.text
+
+    for changes in ({"client_email": None}, {"type": "authorized_user"}, {"key_type": "signjwt"}):
+        bad = _upload(owner_client, dasa_tenant, _dasa_files(**changes))
+        assert bad.status_code == 422, bad.text
+        assert "PRIVATE KEY" not in bad.text and "1234" not in bad.text
+
+
+def test_oauth_mode_unchanged(
+    owner_client: TestClient, tenant: Tenant, app_session: Session
+) -> None:
+    files = {
+        "oauth2.txt": OAUTH2.encode(),
+        "oauth2service.json": json.dumps(DASA_SERVICE).encode(),
+    }
+    assert _upload(owner_client, tenant, files).status_code == 200
+    got = owner_client.get(f"/api/tenants/{tenant.id}").json()
+    assert got["auth_mode"] == "oauth"
+    assert got["sa_client_email"] == "sa@p.iam.gserviceaccount.com"
+    assert got["sa_client_id"] == "1234"
+
+
+GMAIL_BASIC = "https://www.googleapis.com/auth/gmail.settings.basic"
+
+
+def _stored_files(session: Session, tenant: Tenant, keys: Keys) -> dict[str, bytes]:
+    session.expire_all()
+    row = session.get(TenantCredential, tenant.id)
+    assert row is not None
+    sealed = SealedBundle(row.ciphertext, row.nonce, row.wrapped_key, row.key_version)
+    return open_bundle(sealed, keys[0], associated_data=tenant.id.bytes)
+
+
+def test_dasa_upload_records_gmail_scope(
+    owner_client: TestClient, dasa_tenant: Tenant, app_session: Session, credential_keys: Keys
+) -> None:
+    assert _upload(owner_client, dasa_tenant, _dasa_files()).status_code == 200
+    stored = json.loads(_stored_files(app_session, dasa_tenant, credential_keys)[
+        "oauth2service.json"])
+    assert stored == {**DASA_SERVICE, "us_scopes": {"gmail": [GMAIL_BASIC]}}
+
+    other = {"gmail": ["https://mail.google.com/"], "drive3": ["https://x"]}
+    assert _upload(owner_client, dasa_tenant, _dasa_files(us_scopes=other)).status_code == 200
+    stored = json.loads(_stored_files(app_session, dasa_tenant, credential_keys)[
+        "oauth2service.json"])
+    assert stored["us_scopes"] == {"gmail": [GMAIL_BASIC]}
+    assert stored["client_email"] == DASA_SERVICE["client_email"]
+
+
+def test_oauth_upload_keeps_service_key_unchanged(
+    owner_client: TestClient, tenant: Tenant, app_session: Session, credential_keys: Keys
+) -> None:
+    assert _upload(owner_client, tenant).status_code == 200
+    assert _stored_files(app_session, tenant, credential_keys) == GOOD_FILES
+
+
+def test_gmail_scope_record_keeps_other_fields() -> None:
+    doc = {**DASA_SERVICE, "us_scopes": {"admin": ["x"]}, "extra": [1, {"a": None}]}
+    out = json.loads(with_gmail_scope_record(json.dumps(doc).encode()))
+    assert out == {**doc, "us_scopes": {"gmail": [GMAIL_BASIC]}}
+
+
+DASA_ADMIN = "admin@dasa.test"
+DASA_USER_JSON = '{"primaryEmail": "admin@dasa.test", "customerId": "%s"}'
+
+
+@pytest.fixture
+def dasa_stored(owner_client: TestClient, dasa_tenant: Tenant) -> Tenant:
+    assert _upload(owner_client, dasa_tenant, _dasa_files()).status_code == 200
+    return dasa_tenant
+
+
+def _dasa_scenario(fake_gam: Any, *, customer: str = "C04jm7qkb", user_exit: int = 0,
+                   user_err: str = "", delegation_exit: int = 0, transfer_exit: int = 0) -> None:
+    fake_gam.scenario([
+        {"match": ["info", "user"], "exit": user_exit,
+         "stdout": DASA_USER_JSON % customer if user_exit == 0 else "", "stderr": user_err},
+        {"match": ["user", DASA_ADMIN, "check", "serviceaccount"], "exit": delegation_exit,
+         "stderr": SCOPE_FAIL if delegation_exit else ""},
+        {"match": ["print", "transferapps"], "exit": transfer_exit},
+    ])
+
+
+def _dasa_run(owner_client: TestClient, tenant: Tenant, session: Session, keys: Keys) -> Any:
+    job = _health_job(owner_client, tenant, session)
+    run_steps(session, job, keys[0])
+    session.expire_all()
+    fresh = session.get(Tenant, tenant.id)
+    assert fresh is not None
+    return job, _steps(session, job), fresh
+
+
+def test_dasa_health_plan(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session
+) -> None:
+    job = _health_job(owner_client, dasa_stored, app_session)
+    steps = _steps(app_session, job)
+    assert [(s.key, s.args) for s in steps] == [
+        ("directory_role", ["info", "user", DASA_ADMIN, "quick", "formatjson"]),
+        ("gmail_delegation", ["user", DASA_ADMIN, "check", "serviceaccount",
+                              "scope", GMAIL_BASIC]),
+        ("data_transfer", ["print", "transferapps"]),
+    ]
+    assert [s.title for s in steps] == [
+        "Directory access (Admin roles on the service account)",
+        "Gmail delegation (gmail.settings.basic)",
+        "Data Transfer role",
+    ]
+
+
+def test_dasa_health_plan_needs_customer_id(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session
+) -> None:
+    dasa_stored.customer_id = None
+    app_session.execute(update(Job).where(Job.tenant_id == dasa_stored.id)
+                        .values(status=JobStatus.succeeded))
+    app_session.commit()
+    r = owner_client.post(f"/api/tenants/{dasa_stored.id}/health-check")
+    assert r.status_code == 422 and "customer" in r.text.lower()
+
+
+def test_dasa_health_passes_and_activates(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    _dasa_scenario(fake_gam)
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert job.status == JobStatus.succeeded
+    assert tenant.status == TenantStatus.active
+    assert tenant.last_health_message == "Health check passed"
+
+
+def test_dasa_health_runs_every_check(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    _dasa_scenario(fake_gam, delegation_exit=10)
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert [s.status for s in steps] == [StepStatus.succeeded, StepStatus.failed,
+                                         StepStatus.succeeded]
+    assert job.status == JobStatus.failed
+    assert [c["argv"][0] for c in fake_gam.calls()] == ["config", "info", "user", "print"]
+    assert tenant.status == TenantStatus.pending
+    assert tenant.last_health_message is not None
+    assert "scopes are not authorized" in tenant.last_health_message
+    assert "exit code 10" in tenant.last_health_message
+
+
+def test_dasa_health_reports_every_failed_check(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    _dasa_scenario(fake_gam, user_exit=50, user_err="Not Authorized to access this resource/api",
+                   delegation_exit=10, transfer_exit=61)
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert [s.status for s in steps] == [StepStatus.failed] * 3
+    message = tenant.last_health_message or ""
+    assert message.index("Directory access") < message.index("Gmail delegation")
+    assert message.index("Gmail delegation") < message.index("Data Transfer role")
+    assert "Assign the Admin roles to the service account;" in message
+
+
+def test_dasa_directory_check_rejects_other_customer(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    _dasa_scenario(fake_gam, customer="C0other99")
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert steps[0].status == StepStatus.failed
+    assert steps[0].output is not None
+    assert "C0other99" in steps[0].output and "C04jm7qkb" in steps[0].output
+    assert tenant.status == TenantStatus.pending
+
+
+def test_dasa_directory_403_hint(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    _dasa_scenario(fake_gam, user_exit=50, user_err="Not Authorized to access this resource/api")
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert steps[0].status == StepStatus.failed
+    assert "Assign the Admin roles to the service account; changes can take a few minutes." in (
+        tenant.last_health_message or "")
+
+
+def test_dasa_data_transfer_403_hint(
+    owner_client: TestClient, dasa_stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    fake_gam.scenario([
+        {"match": ["info", "user"], "stdout": DASA_USER_JSON % "C04jm7qkb"},
+        {"match": ["print", "transferapps"], "exit": 61,
+         "stderr": "Not Authorized to access this resource/api"},
+    ])
+    job, steps, tenant = _dasa_run(owner_client, dasa_stored, app_session, credential_keys)
+    assert [s.status for s in steps] == [StepStatus.succeeded, StepStatus.succeeded,
+                                         StepStatus.failed]
+    assert ("Assign a custom Admin role with the Data Transfer privilege to the service "
+            "account; changes can take a few minutes.") in (tenant.last_health_message or "")
+
+
+def test_oauth_data_transfer_hint_names_the_token(
+    owner_client: TestClient, stored: Tenant, app_session: Session,
+    credential_keys: Keys, fake_gam: Any, job_dir: Path,
+) -> None:
+    fake_gam.scenario([
+        {"match": ["info", "domain"], "stdout": '{"customerId": "C01"}'},
+        {"match": ["print", "transferapps"], "exit": 61,
+         "stderr": "Not Authorized to access this resource/api"},
+    ])
+    job = _health_job(owner_client, stored, app_session)
+    run_steps(app_session, job, credential_keys[0])
+    app_session.expire_all()
+    tenant = app_session.get(Tenant, stored.id)
+    assert tenant is not None
+    message = tenant.last_health_message or ""
+    assert "admin's OAuth token needs the Data Transfer scope" in message
+    assert "admin.datatransfer" in message and "oauth create" in message
+    assert "to the service account" not in message
+
+
+def test_setup_section_map() -> None:
+    from app.workflows.health import SETUP_SECTION
+
+    assert SETUP_SECTION == {
+        "directory_role": "roles", "data_transfer": "roles", "gmail_delegation": "delegation",
+        "check_service_account": "delegation", "info_domain": "credentials",
+    }
+
+
+def test_dasa_tenant_requires_valid_customer_id(
+    owner_client: TestClient, app_session: Session
+) -> None:
+    body = {"name": "D", "primary_domain": "d.test", "auth_mode": "dasa"}
+    bad = owner_client.post("/api/tenants", json={**body, "customer_id": "my_customer"})
+    assert bad.status_code == 422
+    ok = owner_client.post("/api/tenants", json={**body, "customer_id": " C04jm7qkb "})
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["auth_mode"] == "dasa" and ok.json()["customer_id"] == "C04jm7qkb"
+    tenant_id = ok.json()["id"]
+    r = owner_client.patch(f"/api/tenants/{tenant_id}", json={"customer_id": "C01abcdef"})
+    assert r.status_code == 200, r.text
+    assert r.json()["customer_id"] == "C01abcdef"
+    assert _events(app_session, "tenant.update")[0].details == {"customer_id": "C01abcdef"}
+    assert owner_client.patch(
+        f"/api/tenants/{tenant_id}", json={"customer_id": "nope"}
+    ).status_code == 422
+    # A dasa tenant may be created without a customer id; auth_mode is not patchable.
+    none = owner_client.post("/api/tenants", json={"name": "E", "primary_domain": "e.test",
+                                                   "auth_mode": "dasa"})
+    assert none.status_code == 201 and none.json()["customer_id"] is None

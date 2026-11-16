@@ -174,3 +174,15 @@ def test_models_match_migration(owner_engine: Engine) -> None:
     with owner_engine.connect() as conn:
         diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
     assert diff == []
+
+
+def test_tenant_auth_mode_columns(owner_engine: Engine, make_tenant: Callable[..., Tenant]) -> None:
+    inspector = inspect(owner_engine)
+    tenant_cols = {c["name"]: c for c in inspector.get_columns("tenants")}
+    cred_cols = {c["name"] for c in inspector.get_columns("tenant_credentials")}
+    assert tenant_cols["auth_mode"]["nullable"] is False
+    assert "customer_id" in tenant_cols
+    assert {"sa_client_email", "sa_client_id"} <= cred_cols
+    assert _enum_values(owner_engine, "auth_mode") == ["oauth", "dasa"]
+    tenant = make_tenant()  # no auth_mode given: the database default applies
+    assert tenant.auth_mode == "oauth"

@@ -603,7 +603,7 @@ def test_job_and_action_directories_are_prepared_before_gam_runs(
     prepared: list[tuple[str, int]] = []
 
     def record(where: str) -> Callable[[Any], None]:
-        def _prepare(cfg_dir: Any) -> None:
+        def _prepare(cfg_dir: Any, config_args: Any = None) -> None:
             assert (cfg_dir / "oauth2.txt").exists()
             prepared.append((where, len(fake_gam.calls())))
         return _prepare
@@ -699,3 +699,101 @@ def test_delete_requires_second_confirmation(off: Offboard) -> None:
     r = off.preview(off.only(delete_after_days=30, confirm_delete_email=f" {u.upper()}"))
     assert r.status_code == 200, r.text
     assert r.json()["steps"][-1]["key"] == "schedule_delete"
+
+
+def _make_dasa(off: Offboard, app_session: Session, **overrides: Any) -> list[str]:
+    from app.models import AuthMode
+
+    fields: dict[str, Any] = {"auth_mode": AuthMode.dasa, "admin_email": f"admin@{off.domain}",
+                              "customer_id": "C04jm7qkb"}
+    fields.update(overrides)
+    app_session.execute(update(Tenant).where(Tenant.id == off.tenant.id).values(**fields))
+    app_session.commit()
+    return ["config", "enable_dasa", "true", "admin_email", f"admin@{off.domain}",
+            "customer_id", "C04jm7qkb", "domain", off.domain, "save"]
+
+
+def test_dasa_job_writes_config_before_steps(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    expected = _make_dasa(off, app_session)
+    u = off.user
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
+    created = off.create(off.only())
+    worker.drain()
+    assert _argvs(fake_gam)[0] == expected
+    assert len(_argvs(fake_gam)) > 1
+    assert off.job(created["id"]).status == JobStatus.succeeded
+
+
+def test_oauth_job_runs_no_config_command(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver
+) -> None:
+    u = off.user
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
+    off.create(off.only())
+    worker.drain()
+    assert all(a[0] != "config" for a in _argvs(fake_gam))
+
+
+def test_dasa_config_failure_fails_job_readably(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    _make_dasa(off, app_session)
+    fake_gam.scenario([{"match": ["config"], "exit": 1, "stderr": "boom"}])
+    created = off.create(off.only())
+    worker.drain()
+    assert off.job(created["id"]).status == JobStatus.failed
+    first = next(iter(off.steps(created["id"]).values()))
+    assert first.status == StepStatus.failed
+    assert "could not write its configuration" in (first.output or "")
+    assert [a[0] for a in _argvs(fake_gam)] == ["config"]
+
+
+def test_dasa_tenant_without_customer_id_fails_without_gam(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    _make_dasa(off, app_session, customer_id=None)
+    created = off.create(off.only())
+    worker.drain()
+    assert off.job(created["id"]).status == JobStatus.failed
+    first = next(iter(off.steps(created["id"]).values()))
+    assert "customer ID" in (first.output or "")
+    assert _argvs(fake_gam) == []
+
+
+def test_dasa_scheduled_action_runs_config_first(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    expected = _make_dasa(off, app_session)
+    u = off.user
+    uid = f"uid:{GOOGLE_ID}"
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
+    created = off.create(off.only(delete_after_days=1, confirm_delete_email=u))
+    worker.drain()
+    before = len(fake_gam.calls())
+    _make_actions_due(app_session, created["id"])
+    worker.drain()
+    after = _argvs(fake_gam)[before:]
+    assert after[0] == expected
+    assert ["delete", "user", uid] in after
+    (action,) = off.actions(created["id"])
+    assert action.status == ScheduledStatus.done, action.result
+
+
+def test_dasa_scheduled_config_failure_runs_no_handler(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
+) -> None:
+    _make_dasa(off, app_session)
+    u = off.user
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
+    created = off.create(off.only(delete_after_days=1, confirm_delete_email=u))
+    worker.drain()
+    before = len(fake_gam.calls())
+    fake_gam.scenario([{"match": ["config"], "exit": 1}])
+    _make_actions_due(app_session, created["id"])
+    worker.drain()
+    assert [a[0] for a in _argvs(fake_gam)[before:]] == ["config"]
+    (action,) = off.actions(created["id"])
+    assert action.status == ScheduledStatus.failed
+    assert "could not write its configuration" in (action.result or "")

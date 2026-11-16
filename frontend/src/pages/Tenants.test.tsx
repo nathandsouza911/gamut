@@ -33,6 +33,10 @@ const tenant = (over: Partial<Tenant> = {}): Tenant => ({
   has_credentials: false,
   credential_files: [],
   credentials_uploaded_at: null,
+  auth_mode: "oauth",
+  customer_id: null,
+  sa_client_email: null,
+  sa_client_id: null,
   ...over,
 });
 

@@ -104,6 +104,7 @@ class UserInfo:
     id: str | None  # Google's immutable user id
     primary_email: str | None  # lowercased
     suspended: bool
+    customer_id: str | None = None  # the account's Google Workspace customer id
 
 
 def parse_user_info_json(stdout: str) -> UserInfo:
@@ -122,7 +123,10 @@ def parse_user_info_json(stdout: str) -> UserInfo:
             continue
         if isinstance(value, dict):
             uid, email = value.get("id"), value.get("primaryEmail")
+            customer = value.get("customerId")
             return UserInfo(
+                customer_id=customer.strip() if isinstance(customer, str) and customer.strip()
+                else None,
                 id=str(uid) if isinstance(uid, str | int) and str(uid) else None,
                 primary_email=email.strip().lower() if isinstance(email, str) else None,
                 suspended=value.get("suspended") is True,

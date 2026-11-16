@@ -13,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import audit, auth, jobs, tenants, users, workflows
+from app.api import audit, auth, dashboard, jobs, tenants, users, workflows
 from app.auth.bootstrap import ensure_bootstrap_owner
 from app.auth.oidc import OidcClient
 from app.auth.ratelimit import SlidingWindowLimiter
@@ -65,7 +65,7 @@ def create_app(
         https_only=True,
     )
     for router in (auth.router, users.router, tenants.router, workflows.router,
-                   jobs.router, audit.router, audit.global_router):
+                   jobs.router, audit.router, audit.global_router, dashboard.router):
         app.include_router(router)
 
     _mount_ui(app, settings.static_dir)

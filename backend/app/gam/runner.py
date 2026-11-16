@@ -78,7 +78,7 @@ def run_gam(
     return GamResult(exit_code, stdout, stderr, timed_out, cut_out or cut_err)
 
 
-def prepare_config_dir(cfg_dir: Path) -> None:
+def prepare_config_dir(cfg_dir: Path, config_args: list[str] | None = None) -> None:
     """Let GAM initialise a fresh config directory before any real command runs there.
 
     In a new GAMCFGDIR, GAM 7.52.3 creates gam.cfg and gamcache and prints "Created: ..."
@@ -86,8 +86,17 @@ def prepare_config_dir(cfg_dir: Path) -> None:
     which then no longer parses (seen on a live domain with `print datatransfers`).
     `gam version` makes no API call; its output, and any failure, is discarded: a broken
     GAM fails the real command next.
+
+    With `config_args` (a `gam config ... save`, see app.tenants.gam_config) that command
+    runs instead, which also initialises the directory; a failure raises RuntimeError
+    without GAM's output, which may echo paths.
     """
-    run_gam(["version"], cfg_dir, timeout_s=60, max_output=10_000)
+    if config_args is None:
+        run_gam(["version"], cfg_dir, timeout_s=60, max_output=10_000)
+        return
+    result = run_gam(config_args, cfg_dir, timeout_s=60, max_output=10_000)
+    if result.exit_code != 0:
+        raise RuntimeError(f"GAM could not write its configuration (exit {result.exit_code})")
 
 
 _version_cache: dict[str, str] = {}

@@ -21,6 +21,7 @@ from app.models import Job, JobStep, StepStatus, Tenant
 from app.workflows.base import StepContext, StepOutcome, StepSpec, register, run_gam_step
 
 NAME = "test_scripted"
+NAME_CONTINUE = "test_scripted_continue"
 PROBES: list[dict[str, Any]] = []
 FINISHED: list[str] = []
 
@@ -77,7 +78,15 @@ class Scripted:
         FINISHED.append(f"{job.id}:{job.status.value}")
 
 
+class ScriptedContinue(Scripted):
+    """Same steps, but a failed step does not stop the job."""
+
+    name = NAME_CONTINUE
+    continue_on_failure = True
+
+
 register(Scripted())
+register(ScriptedContinue())
 
 
 def scripted_params(*steps: dict[str, Any], target: str | None = None) -> dict[str, Any]:
