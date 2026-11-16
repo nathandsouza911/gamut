@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.audit.chain import append_event
 from app.crypto.envelope import materialize
 from app.gam.commands import redact_argv
+from app.gam.runner import prepare_config_dir
 from app.jobs.execute import (
     MAX_QUOTA_RETRIES,
     PrepareError,
@@ -311,6 +312,7 @@ def _run_one(session: Session, row: ScheduledAction, private_key: X25519PrivateK
             return
         del files
         session.commit()  # nothing stays open while the handler runs GAM
+        prepare_config_dir(cfg_dir)
         ctx = ActionContext(session=session, tenant=tenant, job=job, action=row, cfg_dir=cfg_dir)
         try:
             result = handler(ctx)

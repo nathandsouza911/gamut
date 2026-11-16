@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 from app.audit.chain import append_event
 from app.crypto.envelope import SealedBundle, materialize, open_bundle, open_json
 from app.gam.commands import redact_argv
-from app.gam.runner import gam_version
+from app.gam.runner import gam_version, prepare_config_dir
 from app.models import (
     Job,
     JobStatus,
@@ -482,6 +482,8 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             )
             return
         del files
+        _commit(session, job)  # nothing stays open while GAM runs
+        prepare_config_dir(cfg_dir)
         for step in steps:
             step.status = StepStatus.running
             step.started_at = step.started_at or _now()

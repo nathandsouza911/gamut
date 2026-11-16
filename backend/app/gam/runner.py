@@ -78,6 +78,18 @@ def run_gam(
     return GamResult(exit_code, stdout, stderr, timed_out, cut_out or cut_err)
 
 
+def prepare_config_dir(cfg_dir: Path) -> None:
+    """Let GAM initialise a fresh config directory before any real command runs there.
+
+    In a new GAMCFGDIR, GAM 7.52.3 creates gam.cfg and gamcache and prints "Created: ..."
+    and "Config File: ..., Initialized" on stdout, mixed into the first command's output,
+    which then no longer parses (seen on a live domain with `print datatransfers`).
+    `gam version` makes no API call; its output, and any failure, is discarded: a broken
+    GAM fails the real command next.
+    """
+    run_gam(["version"], cfg_dir, timeout_s=60, max_output=10_000)
+
+
 _version_cache: dict[str, str] = {}
 
 

@@ -97,3 +97,21 @@ def test_free_text_reaches_gam_as_one_argument(fake_gam, tmp_path):
     assert call["argv"] == argv
     assert call["argv"].count(message) == 1
 
+
+
+def test_prepare_config_dir_runs_version_in_that_dir(fake_gam, tmp_path, monkeypatch):
+    # In a fresh config directory GAM 7.52.3 prints "Created: .../gamcache" and
+    # "Config File: .../gam.cfg, Initialized" on stdout, mixed into the first command's
+    # output (seen on a live domain). `gam version` makes no API call and absorbs them.
+    from app.gam import runner
+
+    seen = []
+    real = runner.run_gam
+
+    def recording(args, cfg_dir, **kwargs):
+        seen.append((args, cfg_dir))
+        return real(args, cfg_dir, **kwargs)
+
+    monkeypatch.setattr(runner, "run_gam", recording)
+    runner.prepare_config_dir(tmp_path)
+    assert seen == [(["version"], tmp_path)]

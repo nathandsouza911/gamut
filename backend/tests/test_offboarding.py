@@ -591,6 +591,36 @@ def test_delete_refused_if_transfer_incomplete(
     assert len(refused) == 1 and refused[0].target == u
 
 
+def test_job_and_action_directories_are_prepared_before_gam_runs(
+    off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each job run and each scheduled action lets GAM initialise its fresh config
+    directory once (app.gam.runner.prepare_config_dir) before any step's command."""
+    import app.jobs.execute as execute
+    import app.jobs.scheduled as scheduled
+
+    prepared: list[tuple[str, int]] = []
+
+    def record(where: str) -> Callable[[Any], None]:
+        def _prepare(cfg_dir: Any) -> None:
+            assert (cfg_dir / "oauth2.txt").exists()
+            prepared.append((where, len(fake_gam.calls())))
+        return _prepare
+
+    monkeypatch.setattr(execute, "prepare_config_dir", record("job"))
+    monkeypatch.setattr(scheduled, "prepare_config_dir", record("action"))
+    u = off.user
+    fake_gam.scenario([_not_suspended(u), _suspended_by_id(u)])
+    created = off.create(off.only(delete_after_days=1, confirm_delete_email=u))
+    worker.drain()
+    assert prepared == [("job", 0)]  # before the job's first GAM command
+    before = len(fake_gam.calls())
+    _make_actions_due(app_session, created["id"])
+    worker.drain()
+    assert prepared == [("job", 0), ("action", before)]
+
+
 def test_scheduled_delete_runs_and_is_idempotent(
     off: Offboard, fake_gam: Any, worker: WorkerDriver, app_session: Session
 ) -> None:
