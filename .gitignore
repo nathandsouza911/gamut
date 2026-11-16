@@ -1,1 +1,25 @@
 .superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Secrets and local config
+.env
+*.key
+*.pem
+secrets/*
+!secrets/*.example

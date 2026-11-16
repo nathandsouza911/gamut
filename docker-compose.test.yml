@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Test harness for hosts without Python 3.12 / Linux (for example Windows).
+# Usage: docker compose -f docker-compose.test.yml run --rm tests pytest -v
+services:
+  testdb:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gamut
+      POSTGRES_PASSWORD: gamut-test
+      POSTGRES_DB: gamut_test
+      GAMUT_OWNER_DB_PASSWORD: gamut-test
+      GAMUT_APP_DB_PASSWORD: gamut-test
+    volumes:
+      # Creates the gamut_owner and gamut_app roles (same script as production).
+      - ./backend/docker/initdb:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      # TCP check: during init the temporary server listens on the socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U gamut -d gamut_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev
+    working_dir: /src/backend
+    environment:
+      # Owner role: migrations and test cleanup. App role: what the app connects as.
+      TEST_DATABASE_URL: postgresql+psycopg://gamut_owner:gamut-test@testdb:5432/gamut_test
+      TEST_APP_DATABASE_URL: postgresql+psycopg://gamut_app:gamut-test@testdb:5432/gamut_test
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # Whole repo, read-only: tests also read LICENSE and scripts/. Caches go to /tmp.
+      - .:/src:ro
+    depends_on:
+      testdb:
+        condition: service_healthy

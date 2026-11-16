@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gamut
+          POSTGRES_PASSWORD: gamut-test
+          POSTGRES_DB: gamut_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gamut -d gamut_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # Owner role (migrations, cleanup) and app role (code under test).
+      TEST_DATABASE_URL: postgresql+psycopg://gamut_owner:gamut-test@localhost:5432/gamut_test
+      TEST_APP_DATABASE_URL: postgresql+psycopg://gamut_app:gamut-test@localhost:5432/gamut_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Create database roles
+        # Same script the db container runs from /docker-entrypoint-initdb.d.
+        run: sh backend/docker/initdb/10-gamut-roles.sh
+        env:
+          PGHOST: localhost
+          PGPASSWORD: gamut-test
+          POSTGRES_USER: gamut
+          POSTGRES_DB: gamut_test
+          GAMUT_OWNER_DB_PASSWORD: gamut-test
+          GAMUT_APP_DB_PASSWORD: gamut-test
+      - name: Install
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Lint
+        working-directory: backend
+        run: ruff check .
+      - name: Type check
+        working-directory: backend
+        run: mypy app
+      - name: Tests
+        working-directory: backend
+        run: pytest
+      - name: SPDX headers
+        run: python scripts/check_spdx.py .
+      - name: Subprocess confinement
+        run: python scripts/check_subprocess.py .
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npx vitest run
