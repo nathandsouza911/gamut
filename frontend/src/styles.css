@@ -38,10 +38,11 @@ pre { white-space: pre-wrap; background: #f0f0f3; padding: 0.5rem; border-radius
 .row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
 .steps { padding-left: 1.2rem; }
 .step { margin-bottom: 0.75rem; }
-.status { font-size: 0.8rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: #e4e4e8; }
-.status.succeeded, .status.active, .status.done { background: #cdeccf; }
-.status.failed, .status.degraded, .status.refused { background: #f6cccc; }
-.status.running, .status.waiting, .status.queued { background: #fbeabc; }
+.status { font-size: 0.8rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: #e4e4e8; color: #1c1c1e; }
+/* Coloured badges keep dark text in both themes: their backgrounds are always pale. */
+.status.succeeded, .status.active, .status.done { background: #cdeccf; color: #0b3d12; }
+.status.failed, .status.degraded, .status.refused { background: #f6cccc; color: #5c0b0b; }
+.status.running, .status.waiting, .status.queued { background: #fbeabc; color: #4a3500; }
 :focus-visible { outline: 2px solid #1a56db; outline-offset: 2px; }
 @media (prefers-color-scheme: dark) {
   :root { color: #eee; background: #18181b; }
@@ -51,7 +52,7 @@ pre { white-space: pre-wrap; background: #f0f0f3; padding: 0.5rem; border-radius
   th, td { border-color: #3a3a40; }
   .error { color: #ff8a80; }
   .warning { background: #3d1518; color: #ffd7d7; border-color: #ff8a80; }
-  .status { background: #3a3a40; }
+  .status { background: #3a3a40; color: #eee; }
   a { color: #8ab4ff; }
 }
 
