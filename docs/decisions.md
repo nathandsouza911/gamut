@@ -228,3 +228,13 @@ Live result (GAM 7.52.3, test tenant) with only `oauth2service.json`, and these 
 Role changes took 30 to 75 seconds to take effect.
 
 **Keyless signing (SignJWT, `key_type: signjwt`) is deferred.** The GAMUT host would need its own Google-trusted identity (a GCE attached service account, or Workload Identity Federation from AWS or an OIDC issuer), which a typical self-hosted Docker box does not have, so it would move the long-lived secret rather than remove it, and each tenant's Google Cloud project would also have to trust GAMUT's identity. Revisit later, most likely for GCP-hosted installs.
+
+## 2026-11-16: Milestone 2 live acceptance
+
+Run against the owner's Google Workspace test tenant (never production) with GAM7 7.52.3, in a fresh local stack built from the milestone-2 branch.
+
+- **Guided setup, DASA mode:** the tenant was created through the guided setup page. The upload was a service account key with GAM's `us_scopes` record removed (a stand-in for a key freshly downloaded from Google Cloud). GAMUT recorded the one Gmail scope itself. All three checks passed: directory access, Gmail delegation, Data Transfer role.
+- **One failing check:** with the Data Transfer role unassigned, only the `data_transfer` check failed (GAM exit 61), and the other two still ran and passed. After the role was reassigned, all three passed again.
+- **Offboarding, DASA only (no `oauth2.txt`):** a throwaway user was offboarded from the UI with an auto-reply and a manager for the Drive transfer. All nine steps succeeded. An earlier run without those two optional fields also succeeded, with the two steps omitted.
+- **Dashboard:** both scheduled deletions were listed on the dashboard and cancelled there.
+- **Audit and secrets:** `gamut verify-audit` passed (82 events). A database dump contained no `PRIVATE KEY`, `private_key`, `refresh_token`, `client_secret` or `us_scopes` text.
