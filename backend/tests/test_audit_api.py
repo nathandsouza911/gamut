@@ -85,7 +85,8 @@ def test_verify_unauthenticated_is_401(client: TestClient) -> None:
 def test_meta_is_public_and_has_no_secrets(client: TestClient) -> None:
     r = client.get("/api/meta")
     assert r.status_code == 200
-    assert r.json() == {"source_url": "https://github.com/nathandsouza911/gamut", "version": "0.1.0"}
+    assert r.json() == {
+        "source_url": "https://github.com/nathandsouza911/gamut", "version": "0.1.0"}
 
 
 def test_static_ui_spa_fallback(
