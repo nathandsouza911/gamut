@@ -55,6 +55,8 @@ def test_free_text_is_single_argument_and_file_forms_rejected():
 
 def test_customer_id_validation():
     assert CustomerId(" C04jm7qkb ") == "C04jm7qkb"
+    assert CustomerId("\tC04jm7qkb\n") == "C04jm7qkb"
+    assert CustomerId("C04jm7qkb\r\n") == "C04jm7qkb"
     for bad in ["my_customer", "c04jm7qkb", "C04", "C04jm7qkb;rm", ""]:
         with pytest.raises(ValueError):
             CustomerId(bad)

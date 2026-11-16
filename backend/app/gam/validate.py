@@ -71,7 +71,8 @@ class CustomerId(str):
     def __new__(cls, value: str) -> Self:
         if not isinstance(value, str):
             raise TypeError("customer id must be a string")
-        cleaned = value.strip(" ")
+        # All surrounding whitespace (pasted ids often carry a tab or newline).
+        cleaned = value.strip()
         if not _CUSTOMER_ID_RE.fullmatch(cleaned):
             raise ValueError("not a valid customer id (for example C04jm7qkb)")
         return super().__new__(cls, cleaned)
