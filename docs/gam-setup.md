@@ -10,7 +10,7 @@ GAMUT's guided setup (Tenants, "Add tenant (guided)") needs only a service accou
 4. **Domain-wide delegation.** In the Admin console go to Security, Access and data control, API controls, Manage domain-wide delegation, Add new. Enter the service account's client ID and the scope `https://www.googleapis.com/auth/gmail.settings.basic`.
 5. **Run the checks.** GAMUT checks the directory role (and that the customer ID matches), Gmail delegation, and the Data Transfer role. Each failure links back to the step to fix. Delete the key file from your machine afterwards.
 
-Only `oauth2service.json` is accepted for a tenant in this mode. See [scopes.md](scopes.md) for what each grant allows.
+Only `oauth2service.json` is accepted for a tenant in this mode. GAMUT records the one Gmail scope (`gmail.settings.basic`) in the uploaded key itself (GAM's `us_scopes` entry, replacing any list already there), so you do not need to run GAM's scope selection (`gam user ... update serviceaccount`); upload the key exactly as Google Cloud downloaded it. See [scopes.md](scopes.md) for what each grant allows.
 
 # Advanced: GAM7 with an OAuth client (existing setups)
 

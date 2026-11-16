@@ -13,6 +13,8 @@ One credential, `oauth2service.json`, and no OAuth client. Grants:
 
 Nothing else needs to be authorized.
 
+GAMUT records the one Gmail scope in the uploaded key itself: when you upload `oauth2service.json`, it sets GAM's scope record (`"us_scopes": {"gmail": ["https://www.googleapis.com/auth/gmail.settings.basic"]}`, replacing any existing value) before storing the key. You need not run GAM's scope selection. Without that record GAM would use its default service-account scope set (full Gmail, gmail.modify, gmail.settings.sharing, ...), and both the auto-reply and the health check would ask for scopes you correctly did not delegate. The health check also names the scope explicitly: `user <admin> check serviceaccount scope https://www.googleapis.com/auth/gmail.settings.basic`.
+
 # Advanced: OAuth client setup
 
 The tables below are for tenants imported with an admin OAuth client (`oauth2.txt`) and are unchanged.

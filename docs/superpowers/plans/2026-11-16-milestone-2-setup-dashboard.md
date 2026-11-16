@@ -229,7 +229,7 @@ Sections (copy is static text in the component; exact wording is the builder's, 
 Before 2026-11-28.
 
 - [ ] **Step 1:** Rebuild the local real-GAM stack (`demo/t10.sh`, git-excluded) on this branch; run migrations.
-- [ ] **Step 2:** Through the UI only: add a tenant with the guided setup in DASA mode, upload the existing test service account key, run checks. Expected: three checks pass. Then deliberately remove the Data Transfer role in the Admin console, run checks → only `data_transfer` fails and links to `roles`; restore it.
+- [ ] **Step 2:** Through the UI only: add a tenant with the guided setup in DASA mode, upload a freshly downloaded key for the test service account (or the existing test key with its `us_scopes` entry removed), so the upload path that records GAMUT's one Gmail scope is exercised; run checks. Expected: three checks pass, and Step 3's auto-reply succeeds with that key. Then deliberately remove the Data Transfer role in the Admin console, run checks → only `data_transfer` fails and links to `roles`; restore it.
 - [ ] **Step 3:** Create a throwaway user with GAM, add it to a group, offboard it from the UI on the DASA tenant. Expected: all nine steps succeed; scheduled deletion visible on the dashboard; cancel it from the dashboard.
 - [ ] **Step 4:** `gamut verify-audit` passes; database dump contains no `PRIVATE KEY`, `refresh_token`.
 - [ ] **Step 5:** Record the run in `docs/decisions.md` ("Milestone 2 live acceptance", no tenant names). **Commit** `docs: record Milestone 2 live acceptance`.
