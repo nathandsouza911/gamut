@@ -2,7 +2,7 @@
 import time
 
 from app.gam.commands import Email, vacation_on
-from app.gam.runner import GamResult, gam_version, run_gam
+from app.gam.runner import GamResult, gam_version, prepare_config_dir, run_gam
 from app.gam.validate import FreeText
 
 
@@ -115,3 +115,17 @@ def test_prepare_config_dir_runs_version_in_that_dir(fake_gam, tmp_path, monkeyp
     monkeypatch.setattr(runner, "run_gam", recording)
     runner.prepare_config_dir(tmp_path)
     assert seen == [(["version"], tmp_path)]
+
+
+def test_prepare_config_dir_runs_config_args(fake_gam, tmp_path):
+    import pytest
+
+    argv = ["config", "enable_dasa", "true", "save"]
+    prepare_config_dir(tmp_path, argv)
+    (call,) = fake_gam.calls()
+    assert call["argv"] == argv
+    assert call["env"]["GAMCFGDIR"] == str(tmp_path)
+    fake_gam.scenario([{"match": ["config"], "exit": 5, "stderr": "secret path /x"}])
+    with pytest.raises(RuntimeError) as err:
+        prepare_config_dir(tmp_path, argv)
+    assert str(err.value) == "GAM could not write its configuration (exit 5)"

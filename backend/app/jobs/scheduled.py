@@ -51,6 +51,7 @@ from app.jobs.execute import (
 from app.jobs.queue import ConflictError
 from app.models import Job, ScheduledAction, ScheduledStatus, Tenant, TenantStatus
 from app.settings import get_settings
+from app.tenants.gam_config import config_args_for
 from app.workflows.base import load_builtin_workflows
 
 log = logging.getLogger(__name__)
@@ -303,6 +304,11 @@ def _run_one(session: Session, row: ScheduledAction, private_key: X25519PrivateK
         fail(str(exc))
         return
     secrets = secret_values(files)
+    try:
+        config_args = config_args_for(tenant)
+    except ValueError as exc:
+        fail(str(exc))
+        return
     with ExitStack() as stack:
         try:
             cfg_dir = stack.enter_context(materialize(files, base=get_settings().job_dir))
@@ -312,7 +318,11 @@ def _run_one(session: Session, row: ScheduledAction, private_key: X25519PrivateK
             return
         del files
         session.commit()  # nothing stays open while the handler runs GAM
-        prepare_config_dir(cfg_dir)
+        try:
+            prepare_config_dir(cfg_dir, config_args)
+        except RuntimeError as exc:
+            fail(str(exc))
+            return
         ctx = ActionContext(session=session, tenant=tenant, job=job, action=row, cfg_dir=cfg_dir)
         try:
             result = handler(ctx)

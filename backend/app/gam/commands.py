@@ -10,7 +10,7 @@ from app.gam.validate import CustomerId, DomainName, Email, FreeText, GoogleUser
 
 __all__ = [
     "CustomerId", "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
-    "create_drive_transfer",
+    "create_drive_transfer", "dasa_config",
     "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
     "info_user_by_id", "list_transfers", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
@@ -30,6 +30,24 @@ def _text(value: FreeText) -> str:
     if not isinstance(value, FreeText):
         raise TypeError("expected validated FreeText")
     return str(value)
+
+
+def _customer(value: CustomerId) -> str:
+    if not isinstance(value, CustomerId):
+        raise TypeError("expected a validated CustomerId")
+    return str(value)
+
+
+def _domain(value: DomainName) -> str:
+    if not isinstance(value, DomainName):
+        raise TypeError("expected a validated DomainName")
+    return str(value)
+
+
+def dasa_config(admin: Email, customer: CustomerId, domain: DomainName) -> list[str]:
+    """Write the DASA settings into gam.cfg (`config ... save`)."""
+    return ["config", "enable_dasa", "true", "admin_email", _email(admin),
+            "customer_id", _customer(customer), "domain", _domain(domain), "save"]
 
 
 def suspend_user(e: Email) -> list[str]:

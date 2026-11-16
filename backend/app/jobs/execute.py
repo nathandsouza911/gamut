@@ -58,6 +58,7 @@ from app.models import (
     User,
 )
 from app.settings import get_settings
+from app.tenants.gam_config import config_args_for
 from app.workflows.base import (
     SEALED_PARAMS_KEY,
     StepContext,
@@ -469,6 +470,11 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
         _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
         return
     secrets = secret_values(files)
+    try:
+        config_args = config_args_for(tenant)
+    except ValueError as exc:
+        _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
+        return
 
     with ExitStack() as stack:
         try:
@@ -483,7 +489,11 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
             return
         del files
         _commit(session, job)  # nothing stays open while GAM runs
-        prepare_config_dir(cfg_dir)
+        try:
+            prepare_config_dir(cfg_dir, config_args)
+        except RuntimeError as exc:
+            _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
+            return
         for step in steps:
             step.status = StepStatus.running
             step.started_at = step.started_at or _now()
