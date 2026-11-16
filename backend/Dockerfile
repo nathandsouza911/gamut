@@ -8,7 +8,7 @@ RUN npm ci
 COPY frontend/ ./
 # AGPL-3.0 section 13: baked-in fallback for the footer "Source code" link, used if
 # /api/meta cannot be reached. Set it with the GAMUT_SOURCE_URL build argument.
-ARG GAMUT_SOURCE_URL=https://github.com/OWNER/gamut
+ARG GAMUT_SOURCE_URL=https://github.com/nathandsouza911/gamut
 ENV VITE_SOURCE_URL=$GAMUT_SOURCE_URL
 RUN npm run build
 

@@ -94,7 +94,7 @@ def test_reads_prefixed_env_and_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.database_url == DB
     assert settings.role == "cli"
     assert settings.gam_bin == "gam"
-    assert settings.source_url == "https://github.com/OWNER/gamut"
+    assert settings.source_url == "https://github.com/nathandsouza911/gamut"
 
 
 def test_web_with_oidc_requires_public_base_url() -> None:

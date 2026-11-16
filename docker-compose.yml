@@ -11,7 +11,7 @@ x-build: &build
   dockerfile: backend/Dockerfile
   target: runtime
   args:
-    GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/OWNER/gamut}
+    GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/nathandsouza911/gamut}
 
 services:
   db:
@@ -69,7 +69,7 @@ services:
       # network below, which is where traffic from a reverse proxy on the host arrives
       # (the published port is bound to 127.0.0.1, so only the host can connect).
       GAMUT_FORWARDED_ALLOW_IPS: ${GAMUT_FORWARDED_ALLOW_IPS:-${GAMUT_NETWORK_GATEWAY:-10.78.80.1}}
-      GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/OWNER/gamut}
+      GAMUT_SOURCE_URL: ${GAMUT_SOURCE_URL:-https://github.com/nathandsouza911/gamut}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

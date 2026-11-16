@@ -4,7 +4,7 @@
 // value from /api/meta (GAMUT_SOURCE_URL) wins; this one is baked in at build time
 // (build argument GAMUT_SOURCE_URL, see backend/Dockerfile).
 export const FALLBACK_SOURCE_URL: string =
-  (import.meta.env.VITE_SOURCE_URL as string | undefined) || "https://github.com/OWNER/gamut";
+  (import.meta.env.VITE_SOURCE_URL as string | undefined) || "https://github.com/nathandsouza911/gamut";
 
 export default function Footer({ sourceUrl }: { sourceUrl: string | null }) {
   return (

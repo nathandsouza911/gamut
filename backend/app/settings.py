@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # Web: directory of the built UI; skipped when it does not exist.
     static_dir: Path = Path("/app/static")
 
-    source_url: str = "https://github.com/OWNER/gamut"
+    source_url: str = "https://github.com/nathandsouza911/gamut"
     gam_bin: str = "gam"
 
     bootstrap_admin_email: str | None = None
