@@ -5,8 +5,10 @@ run_steps opens the tenant's sealed GAM files with the worker's private key, wri
 into one per-job directory (app.crypto.envelope.materialize) for the whole run, and
 executes each runnable step in order through its workflow. After each step it stores
 the outcome, appends an audit event and commits, so progress is visible while the job
-runs. It stops at the first failed step, or at a waiting step (the worker loop claims
-the job again when the step is due and calls the workflow's execute() for it again).
+runs. It stops at the first failed step (unless the workflow sets continue_on_failure:
+then every step runs and the job ends failed if any failed), or at a waiting step (the
+worker loop claims the job again when the step is due and calls the workflow's execute()
+for it again).
 When the job ends it calls the workflow's on_finished hook.
 
 Runnable steps are `pending` ones, `running` ones (left behind by a worker whose lease
@@ -494,6 +496,8 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
         except RuntimeError as exc:
             _fail_before_start(session, job, tenant, workflow, steps, str(exc), actor)
             return
+        keep_going = bool(getattr(workflow, "continue_on_failure", False))
+        any_failed = False
         for step in steps:
             step.status = StepStatus.running
             step.started_at = step.started_at or _now()
@@ -514,11 +518,14 @@ def _run_steps(session: Session, job: Job, private_key: X25519PrivateKey) -> Non
                 secrets=secrets, actor=actor,
             )
             if outcome.status == StepStatus.failed:
-                _finish(session, job, tenant, workflow, JobStatus.failed, actor)
-                return
+                if not keep_going:
+                    _finish(session, job, tenant, workflow, JobStatus.failed, actor)
+                    return
+                any_failed = True
             if outcome.status == StepStatus.waiting:
                 job.status = JobStatus.waiting
                 job.lease_until = None
                 _commit(session, job)
                 return
-    _finish(session, job, tenant, workflow, JobStatus.succeeded, actor)
+    _finish(session, job, tenant, workflow,
+            JobStatus.failed if any_failed else JobStatus.succeeded, actor)

@@ -88,6 +88,8 @@ def test_parse_user_info_json():
     assert info.id == "42" and info.primary_email == "a@x.com" and info.suspended is True
     noisy = 'Getting user\n{"primaryEmail": "b@x.com", "suspended": false}\n'
     info = parse_user_info_json(noisy)
-    assert info.id is None and info.suspended is False
+    assert info.id is None and info.suspended is False and info.customer_id is None
+    with_customer = parse_user_info_json('{"primaryEmail": "c@x.com", "customerId": "C04jm7qkb"}')
+    assert with_customer.customer_id == "C04jm7qkb"
     with pytest.raises(ValueError):
         parse_user_info_json("User: a@x.com\n")

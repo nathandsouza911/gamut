@@ -78,6 +78,8 @@ def test_no_secret_leaks(
         {"match": ["user"], "exit": 10,
          "stdout": f"client_secret={MARKERS['client_secret']}\n",
          "stderr": f"key {MARKERS['private_key_id']} FAIL scope gmail.settings.basic\n"},
+        {"match": ["print", "transferapps"], "exit": 61,
+         "stderr": f"Not Authorized; token {MARKERS['refresh_token']}\n"},
     ])
     responses: list[httpx.Response] = []
 

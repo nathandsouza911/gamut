@@ -36,7 +36,7 @@ from app.models import (
     TenantStatus,
     User,
 )
-from tests.scripted_workflow import NAME, PROBES, scripted_params
+from tests.scripted_workflow import NAME, NAME_CONTINUE, PROBES, scripted_params
 
 Keys = tuple[X25519PrivateKey, str]
 
@@ -49,8 +49,9 @@ def _job(
     *steps: dict[str, Any],
     actor: User | None = None,
     key: str | None = None,
+    workflow: str = NAME,
 ) -> Job:
-    planned = plan_job(NAME, scripted_params(*steps), tenant)
+    planned = plan_job(workflow, scripted_params(*steps), tenant)
     job = create_job(
         session, tenant_id=tenant.id, workflow=planned.workflow, params=planned.params,
         steps=planned.steps, actor=actor, idempotency_key=key or str(uuid.uuid4()),
@@ -269,6 +270,32 @@ def test_failed_step_stops_job_then_retry_resumes(
     run_job(claimed, credential_keys[0])
     assert [c["argv"][1] for c in fake_gam.calls()] == ["a", "b", "b", "c"]
     assert _reload(app_session, job).status == JobStatus.succeeded
+
+
+def test_continue_on_failure_only_for_flagged_workflows(
+    app_session: Session, make_ready_tenant: Callable[..., Tenant],
+    fake_gam: Any, job_dir: Path, credential_keys: Keys,
+) -> None:
+    tenant = make_ready_tenant()
+    steps = ({"key": "a", "args": ["info", "a"]}, {"key": "b", "args": ["info", "b"]},
+             {"key": "c", "args": ["info", "c"]})
+    fake_gam.scenario([{"match": ["info", "b"], "exit": 1, "stderr": "ERROR: boom"}])
+
+    stops = _job(app_session, tenant, *steps)
+    run_steps(app_session, stops, credential_keys[0])
+    assert [s.status for s in _steps(app_session, stops)] == [
+        StepStatus.succeeded, StepStatus.failed, StepStatus.pending]
+    assert _reload(app_session, stops).status == JobStatus.failed
+
+    runs_on = _job(app_session, tenant, *steps, workflow=NAME_CONTINUE)
+    run_steps(app_session, runs_on, credential_keys[0])
+    assert [s.status for s in _steps(app_session, runs_on)] == [
+        StepStatus.succeeded, StepStatus.failed, StepStatus.succeeded]
+    assert _reload(app_session, runs_on).status == JobStatus.failed
+
+    all_ok = _job(app_session, tenant, steps[0], steps[2], workflow=NAME_CONTINUE)
+    run_steps(app_session, all_ok, credential_keys[0])
+    assert _reload(app_session, all_ok).status == JobStatus.succeeded
 
 
 def test_retry_and_skip_need_a_failed_job_and_a_failed_step(

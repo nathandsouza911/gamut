@@ -83,6 +83,9 @@ class StepContext:
 class Workflow(Protocol):
     name: str
     params_model: type[BaseModel]
+    # Optional attribute `continue_on_failure: bool` (read with getattr, default False):
+    # when True a failed step does not stop the job; the later steps still run and the job
+    # ends failed if any step failed.
 
     def plan(self, params: Any, tenant: Tenant) -> list[StepSpec]:
         """The ordered steps for `params` (an instance of params_model). No side effects.

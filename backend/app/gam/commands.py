@@ -12,7 +12,7 @@ __all__ = [
     "CustomerId", "DomainName", "Email", "FreeText", "GoogleUserId", "check_service_account",
     "create_drive_transfer", "dasa_config",
     "delete_user", "delete_user_by_id", "deprovision", "info_domain", "info_user",
-    "info_user_by_id", "list_transfers", "print_user_groups",
+    "info_user_by_id", "list_transfers", "print_transfer_apps", "print_user_groups",
     "redact_argv", "remove_from_all_groups", "reset_password_random", "signout",
     "suspend_user", "vacation_on",
 ]
@@ -139,6 +139,12 @@ def info_domain(domain: DomainName) -> list[str]:
 def check_service_account(e: Email) -> list[str]:
     """Prints PASS/FAIL per scope; exit code 10 when scopes are not authorized."""
     return ["user", _email(e), "check", "serviceaccount"]
+
+
+def print_transfer_apps() -> list[str]:
+    """Lists the apps that support data transfer; needs the Data Transfer admin privilege
+    (exit 61, "Not Authorized" without it)."""
+    return ["print", "transferapps"]
 
 
 def redact_argv(args: list[str]) -> list[str]:
